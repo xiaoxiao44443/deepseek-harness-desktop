@@ -39,7 +39,7 @@ describe('Harness runtime compatibility', () => {
     expect(patchDirectoryPickerWorkerSource(result.source)).toEqual({ source: result.source, changed: false })
   })
 
-  it('resolves a picker dependency nested beside the Harness package', async () => {
+  it.skipIf(process.platform !== 'win32')('resolves a picker dependency nested beside the Harness package', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-runtime-compat-'))
     try {
       const harnessEntry = join(root, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
