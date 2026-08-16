@@ -1,0 +1,58 @@
+name: Build macOS Intel
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build-macos-intel:
+    name: macOS 12+ Intel (x64)
+    runs-on: macos-15-intel
+    timeout-minutes: 45
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '12.0'
+      npm_config_arch: x64
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.19.0
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check types
+        run: pnpm typecheck
+
+      - name: Run tests
+        run: pnpm test
+
+      - name: Build Intel DMG and ZIP
+        run: pnpm package:mac:intel
+
+      - name: Upload Intel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: deepseek-harness-desktop-macos-intel
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            release/DeepSeek-Harness-Desktop-*-macos-x64.dmg
+            release/DeepSeek-Harness-Desktop-*-macos-x64.zip

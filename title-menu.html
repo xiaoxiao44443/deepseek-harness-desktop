@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DeepSeek Harness 菜单</title>
+    <link rel="stylesheet" href="./title-menu.css" />
+  </head>
+  <body>
+    <main class="menu-card" role="menu" aria-label="DeepSeek Harness 应用菜单">
+      <section class="menu-list">
+        <button id="update-action" class="menu-item" type="button" role="menuitem">
+          <span id="update-title" class="item-label">检查 Harness 更新</span>
+          <span id="update-detail" class="item-meta"></span>
+          <span id="update-dot" class="item-dot" aria-hidden="true"></span>
+        </button>
+
+        <button id="release-notes-action" class="menu-item" type="button" role="menuitem">
+          <span class="item-label">版本说明与变更记录</span>
+          <span id="harness-version" class="item-meta">正在读取…</span>
+        </button>
+      </section>
+
+      <footer class="menu-footer">
+        <span>桌面端版本</span>
+        <span id="desktop-version">—</span>
+      </footer>
+    </main>
+    <script src="./title-menu.js"></script>
+  </body>
+</html>

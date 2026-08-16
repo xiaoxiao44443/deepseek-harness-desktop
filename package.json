@@ -1,0 +1,91 @@
+{
+  "name": "deepseek-harness-desktop",
+  "productName": "DeepSeek Harness",
+  "version": "0.1.0",
+  "description": "A fast desktop shell for DeepSeek Harness with managed Harness runtime updates.",
+  "type": "module",
+  "main": "dist/main/index.js",
+  "author": "Saltfish",
+  "license": "MIT",
+  "private": true,
+  "packageManager": "pnpm@11.19.0",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "build": "pnpm run build:main && pnpm run build:renderer",
+    "build:main": "tsc -p tsconfig.json",
+    "build:renderer": "vite build",
+    "postinstall": "node node_modules/electron/install.js",
+    "prepare:runtime": "node scripts/prepare-bundled-harness.mjs",
+    "dev": "pnpm run build:main && concurrently -k -s first \"vite\" \"wait-on http-get://127.0.0.1:5173 && cross-env HARNESS_DESKTOP_RENDERER_URL=http://127.0.0.1:5173 electron . --dev\"",
+    "start": "electron .",
+    "test": "vitest run --config vitest.config.ts",
+    "test:watch": "vitest --config vitest.config.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
+    "package:win": "pnpm run build && pnpm run prepare:runtime && electron-builder --win nsis",
+    "package:mac:intel": "pnpm run build && pnpm run prepare:runtime && electron-builder --mac dmg zip --x64"
+  },
+  "dependencies": {
+    "lucide-react": "1.30.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "semver": "7.8.5",
+    "tar": "7.5.22"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh": "0.1.0-rc.6",
+    "@types/node": "24.10.1",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@types/semver": "7.7.1",
+    "@vitejs/plugin-react": "6.0.5",
+    "concurrently": "9.2.1",
+    "cross-env": "10.1.0",
+    "electron": "43.4.0",
+    "electron-builder": "26.15.3",
+    "npm": "12.0.2",
+    "pnpm": "11.19.0",
+    "typescript": "7.0.2",
+    "vite": "8.2.1",
+    "vitest": "4.1.10",
+    "wait-on": "9.0.3"
+  },
+  "build": {
+    "appId": "com.saltfish.deepseek-harness-desktop",
+    "productName": "DeepSeek Harness",
+    "asar": true,
+    "directories": { "output": "release" },
+    "files": ["dist/**/*", "package.json"],
+    "extraResources": [
+      { "from": "app-icon.png", "to": "app-icon.png" },
+      { "from": "titlebar-icon.png", "to": "titlebar-icon.png" },
+      { "from": "build/harness-runtime.tgz", "to": "harness-runtime.tgz" }
+    ],
+    "win": {
+      "icon": "app-icon.png",
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "artifactName": "DeepSeek-Harness-Desktop-${version}-${arch}.${ext}"
+    },
+    "mac": {
+      "icon": "app-icon.png",
+      "category": "public.app-category.developer-tools",
+      "minimumSystemVersion": "12.0.0",
+      "identity": null,
+      "hardenedRuntime": false,
+      "target": [
+        { "target": "dmg", "arch": ["x64"] },
+        { "target": "zip", "arch": ["x64"] }
+      ],
+      "artifactName": "DeepSeek-Harness-Desktop-${version}-macos-${arch}.${ext}"
+    },
+    "dmg": {
+      "title": "DeepSeek Harness Desktop ${version}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "include": "installer.nsh",
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  }
+}

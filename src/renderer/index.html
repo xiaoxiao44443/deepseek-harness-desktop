@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DeepSeek Harness</title>
+    <script>
+      (() => {
+        const configuredTheme = new URLSearchParams(location.search).get('theme')
+        document.documentElement.dataset.theme = configuredTheme === 'dark' || configuredTheme === 'light'
+          ? configuredTheme
+          : matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+        const platform = new URLSearchParams(location.search).get('platform')
+        if (platform === 'windows' || platform === 'macos' || platform === 'linux') {
+          document.documentElement.dataset.platform = platform
+        }
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/main.tsx"></script>
+  </body>
+</html>
