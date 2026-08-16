@@ -42,6 +42,8 @@ pnpm test
 pnpm package:win
 ```
 
+仓库提供 `.github/workflows/build-windows.yml`，可在 GitHub Actions 中手动构建 Windows x64 NSIS 安装包；推送 `v*` 标签时也会自动构建。当前产物未签名，适合测试，首次运行可能触发 Windows SmartScreen 提示。
+
 Windows 卸载程序会询问是否一并删除 `~/.saltfish/deepseek-harness-desktop`。该选项默认关闭；无论如何都不会删除官方 Harness 共用的 `~/.dsh`。
 
 构建 macOS Intel 安装包（最低 macOS 12）：
