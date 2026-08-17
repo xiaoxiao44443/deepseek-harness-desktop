@@ -5,6 +5,7 @@ import type { Readable } from 'node:stream'
 import type { HarnessRuntimeCandidate } from './harness-runtime.js'
 import { HarnessToolchainManager, prependToolchainToPath } from './harness-toolchain.js'
 import type { HarnessDesktopBridgeLaunch } from './harness-desktop-bridge.js'
+import { parsePluginInitializationFailure, PluginInitializationError } from './plugin-recovery.js'
 
 const URL_PATTERN = /dsh web:\s+(http:\/\/127\.0\.0\.1:\d+)/u
 const START_TIMEOUT_MS = 90_000
@@ -39,6 +40,7 @@ export class HarnessProcess extends EventEmitter {
     private readonly directoryPickerUrl: string,
     private readonly toolchainManager: HarnessToolchainManager,
     private readonly desktopBridge: HarnessDesktopBridgeLaunch,
+    private readonly pluginRecoveryPatchPath: string,
   ) { super() }
 
   async start(candidate: HarnessRuntimeCandidate, options: HarnessLaunchOptions = {}): Promise<RunningHarness> {
@@ -48,6 +50,7 @@ export class HarnessProcess extends EventEmitter {
     const environment = prependToolchainToPath(process.env, toolchain.binPath)
     const harnessArgs = ['web', '--patch', this.desktopBridge.patchPath]
     if (options.patchPath !== undefined) harnessArgs.push('--patch', options.patchPath)
+    harnessArgs.push('--patch', this.pluginRecoveryPatchPath)
     harnessArgs.push('--port', '0')
     const child = spawn(this.electronExecutable, [
       '--expose-internals', HARNESS_BOOTSTRAP, candidate.entryPath, ...harnessArgs,
@@ -63,6 +66,7 @@ export class HarnessProcess extends EventEmitter {
         DSH_DESKTOP_CONTROL_URL: this.desktopBridge.controlUrl,
         DSH_DESKTOP_CONTROL_TOKEN: this.desktopBridge.controlToken,
         DSH_DESKTOP_PROFILE_PATH: this.desktopBridge.profilePath,
+        DSH_DESKTOP_BRIDGE_ROOT: this.desktopBridge.pluginRootPath,
         ELECTRON_RUN_AS_NODE: '1',
         ELECTRON_NO_ATTACH_CONSOLE: '1',
         FORCE_COLOR: '0',
@@ -71,17 +75,32 @@ export class HarnessProcess extends EventEmitter {
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     this.child = child
+    let startupOutput = ''
+    const captureStartupOutput = (chunk: Buffer): void => {
+      startupOutput = `${startupOutput}${chunk.toString('utf8')}`.slice(-64_000)
+    }
+    child.stdout.on('data', captureStartupOutput)
+    child.stderr.on('data', captureStartupOutput)
     child.stdout.on('data', (chunk: Buffer) => this.emit('log', 'stdout', chunk.toString('utf8')))
     child.stderr.on('data', (chunk: Buffer) => this.emit('log', 'stderr', chunk.toString('utf8')))
     child.once('exit', (code, signal) => {
       if (this.child === child) this.child = undefined
       this.emit('exit', { code, signal, expected: this.stopping })
     })
-    const url = await this.waitForUrl(child)
-    await this.waitForHealthy(url, child)
-    this.activeCandidate = candidate
-    this.activeEnvironment = environment
-    return { candidate, url }
+    try {
+      const url = await this.waitForUrl(child)
+      await this.waitForHealthy(url, child)
+      this.activeCandidate = candidate
+      this.activeEnvironment = environment
+      return { candidate, url }
+    } catch (error) {
+      const failure = parsePluginInitializationFailure(startupOutput)
+      if (failure !== undefined) throw new PluginInitializationError(failure)
+      throw error
+    } finally {
+      child.stdout.off('data', captureStartupOutput)
+      child.stderr.off('data', captureStartupOutput)
+    }
   }
 
   async runPlugin(profile: string, args: string[]): Promise<HarnessCommandResult> {

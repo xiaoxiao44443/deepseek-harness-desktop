@@ -18,10 +18,17 @@ describe('HarnessDesktopBridgeHost', () => {
     const userDataPath = await mkdtemp(join(tmpdir(), 'dsh-desktop-bridge-'))
     temporaryPaths.push(userDataPath)
     const restartHarness = vi.fn(async () => undefined)
+    const notifications = {
+      currentSettings: { turnCompletion: 'unfocused', permissionRequests: true, questions: true },
+      updateSettings: vi.fn(async (value: unknown) => value),
+      show: vi.fn(async () => true),
+    }
     const host = new HarnessDesktopBridgeHost({
       userDataPath,
-      pluginEntryPath: '/private/example/dsh-desktop-bridge/lib/index.js',
+      pluginName: 'dsh-desktop-bridge',
+      pluginRootPath: '/private/example/resources/dsh-desktop-bridge',
       profilePath: '/private/example/.dsh/profiles/web',
+      notifications: notifications as never,
       restartHarness,
       restartDelayMs: 5,
     })
@@ -34,9 +41,10 @@ describe('HarnessDesktopBridgeHost', () => {
     expect(patch).toEqual([{
       insert: [{
         id: 'desktop-bridge',
-        name: '/private/example/dsh-desktop-bridge/lib/index.js',
+        name: 'dsh-desktop-bridge',
       }],
     }])
+    expect(launch.pluginRootPath).toBe('/private/example/resources/dsh-desktop-bridge')
 
     const denied = await fetch(launch.controlUrl, { method: 'POST' })
     expect(denied.status).toBe(401)
@@ -52,10 +60,44 @@ describe('HarnessDesktopBridgeHost', () => {
     })
     expect(accepted.status).toBe(202)
     await vi.waitFor(() => expect(restartHarness).toHaveBeenCalledWith('加载 greet'))
+
+    const controlOrigin = new URL(launch.controlUrl).origin
+    const settings = await fetch(`${controlOrigin}/v1/notifications/settings`, {
+      headers: { authorization: `Bearer ${launch.controlToken}` },
+    })
+    expect(settings.status).toBe(200)
+    await expect(settings.json()).resolves.toEqual({ settings: notifications.currentSettings })
+
+    const updated = await fetch(`${controlOrigin}/v1/notifications/settings`, {
+      method: 'PUT',
+      headers: {
+        authorization: `Bearer ${launch.controlToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ turnCompletion: 'always', permissionRequests: false, questions: true }),
+    })
+    expect(updated.status).toBe(200)
+    expect(notifications.updateSettings).toHaveBeenCalledWith({
+      turnCompletion: 'always',
+      permissionRequests: false,
+      questions: true,
+    })
+
+    const shown = await fetch(`${controlOrigin}/v1/notifications/show`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${launch.controlToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ kind: 'question', sessionId: 'session-1' }),
+    })
+    expect(shown.status).toBe(200)
+    expect(notifications.show).toHaveBeenCalledWith({ kind: 'question', sessionId: 'session-1' })
+
   })
 })
 
-describe('@saltfish/dsh-desktop-bridge tool', () => {
+describe('dsh-desktop-bridge tool', () => {
   it('tells the model to call tools already present in the current request directly', () => {
     expect(STATIC_GUIDANCE).toContain('authoritative callable set for this same turn')
     expect(STATIC_GUIDANCE).toContain('call it directly now')
@@ -114,8 +156,10 @@ describe('@saltfish/dsh-desktop-bridge tool', () => {
 
     const registeredContexts: Array<{ text: () => string }> = []
     const emit = vi.fn()
+    const registerRoute = vi.fn()
     const cleanup = await apply({
       tools: { register: vi.fn() },
+      webServer: { register: registerRoute },
       systemPrompt: {
         section: vi.fn(),
         context: vi.fn((context: { text: () => string }) => { registeredContexts.push(context) }),
@@ -127,6 +171,12 @@ describe('@saltfish/dsh-desktop-bridge tool', () => {
       controlToken: 'secret',
       profilePath,
     })
+
+    expect(registerRoute).toHaveBeenCalledTimes(2)
+    expect(registerRoute.mock.calls.map(([route]) => route.path)).toEqual([
+      '/api/dsh-desktop/notifications/settings',
+      '/api/dsh-desktop/notifications/show',
+    ])
 
     expect(registeredContexts[0]?.text()).toBe('')
     await writeFile(join(profilePath, 'package.json'), '{"dependencies":{"greet":"1.0.0"}}\n', 'utf8')

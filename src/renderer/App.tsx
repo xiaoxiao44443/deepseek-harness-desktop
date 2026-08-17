@@ -1,7 +1,7 @@
-import { ChevronDown, Code2, Copy, Minus, RefreshCw, Square, X } from 'lucide-react'
+import { ChevronDown, Code2, Copy, Minus, Square, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import type { DesktopState, DevelopmentState, TitleMenuAction } from '../shared/contracts.js'
+import type { DesktopState, DevelopmentState, PluginRecoveryEntry, TitleMenuAction } from '../shared/contracts.js'
 import appIconUrl from '../../app-icon.png'
 import titlebarIconUrl from '../../titlebar-icon.png'
 
@@ -91,11 +91,13 @@ function Modal({ open, className = '', labelledBy, closeLabel, onClose, children
 function DevelopmentPanel({
   open,
   state,
+  disabledPlugins,
   harnessReady,
   onClose,
 }: {
   open: boolean
   state: DevelopmentState
+  disabledPlugins: PluginRecoveryEntry[]
   harnessReady: boolean
   onClose: () => void
 }): ReactNode {
@@ -108,14 +110,15 @@ function DevelopmentPanel({
     if (open) closeButton.current?.focus({ preventScroll: true })
   }, [open])
 
-  const runAction = useCallback(async (action: () => Promise<void>) => {
+  const runAction = useCallback(async (action: () => Promise<void>, closeOnSuccess = false) => {
     setActionError(undefined)
     try {
       await action()
+      if (closeOnSuccess) onClose()
     } catch (error) {
       setActionError(error instanceof Error ? error.message : String(error))
     }
-  }, [])
+  }, [onClose])
 
   const patchPath = state.patchPath ?? ''
   const commandOutput = actionError ?? state.commandOutput
@@ -144,8 +147,22 @@ function DevelopmentPanel({
             <button className="compact-button" type="button" disabled={state.restarting} onClick={() => void runAction(() => desktopApi.chooseDevelopmentPatch())}>选择文件</button>
             <button className="compact-button subtle" type="button" disabled={!patchPath || state.restarting} onClick={() => void runAction(() => desktopApi.clearDevelopmentPatch())}>清除</button>
           </div>
-          <div className="section-actions"><button className="dialog-button primary" type="button" disabled={state.restarting} onClick={() => void runAction(() => desktopApi.restartHarnessForDevelopment())}>{state.restarting ? '正在重启…' : patchPath ? '重启并应用' : '重启 Harness'}</button></div>
+          <div className="section-actions"><button className="dialog-button primary" type="button" disabled={state.restarting} onClick={() => void runAction(() => desktopApi.restartHarnessForDevelopment(), true)}>{state.restarting ? '正在重启…' : patchPath ? '重启并应用' : '重启 Harness'}</button></div>
         </section>
+
+        {disabledPlugins.length > 0 ? (
+          <section className="development-section">
+            <div className="section-heading"><div><h3>插件恢复</h3><p>这些插件因初始化失败被桌面端临时禁用；修复后可重新启用并重启 Harness。</p></div></div>
+            <div className="recovered-plugin-list">
+              {disabledPlugins.map((plugin) => (
+                <div className="recovered-plugin-row" key={plugin.entryId}>
+                  <div><strong>{plugin.pluginName}</strong><code>{plugin.entryId}</code></div>
+                  <button className="compact-button" type="button" disabled={state.restarting} onClick={() => void runAction(() => desktopApi.restoreRecoveredPlugin(plugin.entryId), true)}>重新启用并重启</button>
+                </div>
+              ))}
+            </div>
+          </section>
+        ) : null}
 
         <section className="development-section">
           <div className="section-heading"><div><h3>Plugin 命令</h3><p>运行 <code>dsh plugin --profile &lt;名称&gt; &lt;pnpm 参数…&gt;</code>。</p></div></div>
@@ -170,6 +187,8 @@ export function App(): ReactNode {
   const [menuOpen, setMenuOpen] = useState(false)
   const [releaseNotesOpen, setReleaseNotesOpen] = useState(false)
   const [developmentOpen, setDevelopmentOpen] = useState(false)
+  const [startupActionPending, setStartupActionPending] = useState(false)
+  const [startupActionError, setStartupActionError] = useState<string>()
   const harnessFrame = useRef<HTMLIFrameElement>(null)
   const releaseCloseButton = useRef<HTMLButtonElement>(null)
 
@@ -202,6 +221,11 @@ export function App(): ReactNode {
 
   useEffect(() => { if (releaseNotesOpen) releaseCloseButton.current?.focus({ preventScroll: true }) }, [releaseNotesOpen])
 
+  useEffect(() => {
+    setStartupActionPending(false)
+    setStartupActionError(undefined)
+  }, [state?.harnessLoadId, state?.pluginFailure?.entryId])
+
   const focusHarness = useCallback(() => {
     if (state?.harnessUrl) harnessFrame.current?.focus({ preventScroll: true })
   }, [state?.harnessUrl])
@@ -218,6 +242,19 @@ export function App(): ReactNode {
   const harnessUrl = state?.harnessUrl ?? ''
   const availableUpdate = state?.updateVersion !== undefined && state.updateVersion !== state.harnessVersion
   const patchEnabled = Boolean(state?.development.patchPath)
+  const pluginFailure = state?.pluginFailure
+  const runStartupAction = async (action: () => Promise<void>): Promise<void> => {
+    if (startupActionPending) return
+    setStartupActionPending(true)
+    setStartupActionError(undefined)
+    try {
+      await action()
+    } catch (error) {
+      setStartupActionError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setStartupActionPending(false)
+    }
+  }
 
   return (
     <>
@@ -226,9 +263,19 @@ export function App(): ReactNode {
         {!ready ? (
           <section className={`startup ${state?.harnessLifecycle === 'error' ? 'error' : ''}`}>
             <div className="loader" aria-hidden="true" />
-            <h1 id="startup-title">{state?.harnessLifecycle === 'error' ? 'DeepSeek Harness 启动失败' : preparingRuntime ? '正在准备 DeepSeek Harness' : '正在启动 DeepSeek Harness'}</h1>
+            <h1 id="startup-title">{pluginFailure ? 'Harness 插件初始化失败' : state?.harnessLifecycle === 'error' ? 'DeepSeek Harness 启动失败' : preparingRuntime ? '正在准备 DeepSeek Harness' : '正在启动 DeepSeek Harness'}</h1>
             <p id="startup-message">{state?.harnessMessage ?? '正在准备本地 Harness 服务…'}</p>
-            {state?.harnessLifecycle === 'error' ? <button className="secondary-button" type="button" onClick={() => void desktopApi.checkForHarnessUpdate()}>重新检查更新</button> : null}
+            {pluginFailure ? (
+              <div className="plugin-recovery-actions">
+                <p>可以先临时禁用 <strong>{pluginFailure.pluginName}</strong>，让 Harness 恢复启动。修好插件后可在“开发工具 → 插件恢复”中重新启用。</p>
+                {pluginFailure.recoverable ? (
+                  <button className="secondary-button recovery-button" type="button" disabled={startupActionPending} onClick={() => void runStartupAction(() => desktopApi.recoverFailedPlugin())}>
+                    {startupActionPending ? '正在禁用并重启…' : '临时禁用该插件并重启'}
+                  </button>
+                ) : <p className="startup-action-error">这个内置桥接插件不能自动禁用，请重新安装桌面应用。</p>}
+                {startupActionError ? <p className="startup-action-error" role="alert">{startupActionError}</p> : null}
+              </div>
+            ) : state?.harnessLifecycle === 'error' ? <button className="secondary-button" type="button" onClick={() => void desktopApi.checkForHarnessUpdate()}>重新检查更新</button> : null}
           </section>
         ) : null}
       </main>
@@ -237,7 +284,6 @@ export function App(): ReactNode {
         <button id="title-menu" className="brand" type="button" aria-label="打开应用菜单" aria-expanded={menuOpen} title="应用菜单" onClick={(event) => { event.currentTarget.blur(); setMenuOpen((open) => !open) }}>
           <span className="brand-mark-shell" aria-hidden="true"><img className="brand-mark" src={titlebarIconUrl} alt="" draggable="false" /></span><span>DeepSeek Harness</span><ChevronDown className="menu-chevron" aria-hidden="true" />
         </button>
-        <nav className="navigation" aria-label="页面操作"><button id="reload" className="icon-button" type="button" title="刷新" aria-label="刷新" disabled={!harnessUrl} onClick={(event) => { event.currentTarget.blur(); void desktopApi.navigate('reload') }}><RefreshCw /></button></nav>
         <div className="drag-region" aria-hidden="true" />
         <div className="window-controls" aria-hidden={state?.platform === 'macos'}>
           <button id="minimize" className="window-button" type="button" aria-label="最小化" onClick={() => void desktopApi.windowAction('minimize')}><Minus /></button>
@@ -270,7 +316,7 @@ export function App(): ReactNode {
         <footer className="dialog-actions"><button className="dialog-button secondary" type="button" onClick={() => setReleaseNotesOpen(false)}>关闭</button><button className="dialog-button primary" type="button" onClick={(event) => { event.currentTarget.blur(); void desktopApi.titleMenuAction('open-changes') }}>查看官方变更记录</button></footer>
       </Modal>
 
-      {state !== undefined ? <DevelopmentPanel open={developmentOpen} state={state.development} harnessReady={ready} onClose={() => { setDevelopmentOpen(false); requestAnimationFrame(focusHarness) }} /> : null}
+      {state !== undefined ? <DevelopmentPanel open={developmentOpen} state={state.development} disabledPlugins={state.disabledPlugins} harnessReady={ready} onClose={() => { setDevelopmentOpen(false); requestAnimationFrame(focusHarness) }} /> : null}
     </>
   )
 }

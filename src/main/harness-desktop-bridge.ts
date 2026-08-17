@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
+import type { DesktopNotificationService } from './desktop-notifications.js'
 
 const CONTROL_HOST = '127.0.0.1'
 const MAX_REQUEST_BYTES = 16_384
@@ -12,12 +13,15 @@ export interface HarnessDesktopBridgeLaunch {
   controlUrl: string
   controlToken: string
   profilePath: string
+  pluginRootPath: string
 }
 
 export interface HarnessDesktopBridgeOptions {
   userDataPath: string
-  pluginEntryPath: string
+  pluginName: string
+  pluginRootPath: string
   profilePath: string
+  notifications: DesktopNotificationService
   restartHarness(reason: string): Promise<void>
   restartDelayMs?: number
 }
@@ -37,14 +41,17 @@ export class HarnessDesktopBridgeHost {
 
   async start(): Promise<HarnessDesktopBridgeLaunch> {
     if (this.launch !== undefined) return { ...this.launch }
-    if (!isAbsolute(this.options.pluginEntryPath)) throw new Error('Desktop bridge plugin entry must be absolute')
+    if (!isAbsolute(this.options.pluginRootPath)) throw new Error('Desktop bridge plugin root path must be absolute')
+    if (this.options.pluginName.trim().length === 0 || /[\r\n\0]/u.test(this.options.pluginName)) {
+      throw new Error('Desktop bridge plugin name is invalid')
+    }
 
     const patchPath = join(this.options.userDataPath, 'desktop-bridge.patch.json')
     await mkdir(this.options.userDataPath, { recursive: true })
     await writeFile(patchPath, `${JSON.stringify([
       {
         insert: [
-          { id: 'desktop-bridge', name: this.options.pluginEntryPath },
+          { id: 'desktop-bridge', name: this.options.pluginName },
         ],
       },
     ], null, 2)}\n`, 'utf8')
@@ -88,6 +95,7 @@ export class HarnessDesktopBridgeHost {
       controlUrl: `http://${CONTROL_HOST}:${address.port}/v1/restart-harness`,
       controlToken,
       profilePath: this.options.profilePath,
+      pluginRootPath: this.options.pluginRootPath,
     }
     return { ...this.launch }
   }
@@ -108,17 +116,48 @@ export class HarnessDesktopBridgeHost {
     response: ServerResponse,
     controlToken: string,
   ): Promise<void> {
-    if (request.url !== '/v1/restart-harness') {
+    const pathname = new URL(request.url ?? '/', 'http://127.0.0.1').pathname
+    const supported = pathname === '/v1/restart-harness'
+      || pathname === '/v1/notifications/settings'
+      || pathname === '/v1/notifications/show'
+    if (!supported) {
       this.sendJson(response, 404, { accepted: false, message: 'Not found' })
-      return
-    }
-    if (request.method !== 'POST') {
-      response.setHeader('allow', 'POST')
-      this.sendJson(response, 405, { accepted: false, message: 'Method not allowed' })
       return
     }
     if (request.headers.authorization !== `Bearer ${controlToken}`) {
       this.sendJson(response, 401, { accepted: false, message: 'Unauthorized' })
+      return
+    }
+
+    if (pathname === '/v1/notifications/settings') {
+      if (request.method === 'GET') {
+        this.sendJson(response, 200, { settings: this.options.notifications.currentSettings })
+        return
+      }
+      if (request.method === 'PUT') {
+        const settings = await this.options.notifications.updateSettings(await this.readJsonBody(request))
+        this.sendJson(response, 200, { settings })
+        return
+      }
+      response.setHeader('allow', 'GET, PUT')
+      this.sendJson(response, 405, { accepted: false, message: 'Method not allowed' })
+      return
+    }
+
+    if (pathname === '/v1/notifications/show') {
+      if (request.method !== 'POST') {
+        response.setHeader('allow', 'POST')
+        this.sendJson(response, 405, { accepted: false, message: 'Method not allowed' })
+        return
+      }
+      const shown = await this.options.notifications.show(await this.readJsonBody(request))
+      this.sendJson(response, 200, { shown })
+      return
+    }
+
+    if (request.method !== 'POST') {
+      response.setHeader('allow', 'POST')
+      this.sendJson(response, 405, { accepted: false, message: 'Method not allowed' })
       return
     }
 

@@ -1,12 +1,13 @@
 import childProcess from 'node:child_process'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
-import { createRequire, syncBuiltinESMExports } from 'node:module'
-import { join } from 'node:path'
+import { createRequire, registerHooks, syncBuiltinESMExports } from 'node:module'
+import { isAbsolute, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const electronExecutable = process.execPath.toLowerCase()
 const originalSpawn = childProcess.spawn
 const directoryPickerWorkerShim = join(__dirname, 'directory-picker-worker.cjs')
+const DESKTOP_BRIDGE_PACKAGE = 'dsh-desktop-bridge'
 
 interface KoffiLibrary {
   func(declaration: string): (...args: unknown[]) => unknown
@@ -82,6 +83,31 @@ childProcess.spawn = desktopSpawn as typeof childProcess.spawn
 syncBuiltinESMExports()
 
 /**
+ * The active DSH Profile is the ESM import base for loader entries, so Node's
+ * legacy NODE_PATH cannot expose an app-bundled package to it. Keep the bridge
+ * package outside ~/.dsh and resolve only its three public entry points here.
+ * This preserves a real package name for DSH's client-module inventory while
+ * avoiding any mutation of the user's Profile dependencies.
+ */
+function registerDesktopBridgeResolver(): void {
+  const root = process.env.DSH_DESKTOP_BRIDGE_ROOT
+  if (root === undefined) return
+  if (!isAbsolute(root)) throw new Error('DSH_DESKTOP_BRIDGE_ROOT must be absolute')
+  const entries = new Map<string, string>([
+    [DESKTOP_BRIDGE_PACKAGE, join(root, 'lib', 'index.js')],
+    [`${DESKTOP_BRIDGE_PACKAGE}/client`, join(root, 'lib', 'client.js')],
+    [`${DESKTOP_BRIDGE_PACKAGE}/package.json`, join(root, 'package.json')],
+  ])
+  registerHooks({
+    resolve(specifier, context, nextResolve) {
+      const entry = entries.get(specifier)
+      if (entry !== undefined) return { url: pathToFileURL(entry).href, shortCircuit: true }
+      return nextResolve(specifier, context)
+    },
+  })
+}
+
+/**
  * Electron is used as the bundled Node executable for Harness. The mode flag
  * is only needed while Electron boots; leaving it in the environment breaks
  * native openers when the selected editor is itself an Electron application.
@@ -92,6 +118,7 @@ async function bootstrap(): Promise<void> {
 
   const harnessArgs = process.argv.slice(3)
   ensureHiddenHarnessConsole(harnessEntry)
+  registerDesktopBridgeResolver()
   delete process.env.ELECTRON_RUN_AS_NODE
   delete process.env.ELECTRON_NO_ATTACH_CONSOLE
   process.argv = [process.execPath, harnessEntry, ...harnessArgs]

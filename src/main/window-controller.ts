@@ -3,9 +3,10 @@ import { fileURLToPath } from 'node:url'
 import { readFile } from 'node:fs/promises'
 import { app, BrowserWindow, ipcMain, nativeTheme, shell } from 'electron'
 import type { WebFrameMain } from 'electron'
-import type { ColorTheme, DesktopPlatform, DesktopState, DevelopmentPluginRequest, HarnessLifecycle, NavigationAction, TitleMenuAction, WindowAction } from '../shared/contracts.js'
+import type { ColorTheme, DesktopPlatform, DesktopState, DevelopmentPluginRequest, HarnessLifecycle, PluginInitializationFailure, TitleMenuAction, WindowAction } from '../shared/contracts.js'
 import type { HarnessRuntimeManager } from './harness-runtime.js'
 import type { DevelopmentService } from './development-service.js'
+import { parsePluginInitializationFailure, type PluginRecoveryService } from './plugin-recovery.js'
 
 const STATE_CHANNEL = 'desktop:state'
 const HARNESS_LOAD_TIMEOUT_MS = 45_000
@@ -25,6 +26,7 @@ export class WindowController {
   private window: BrowserWindow | undefined
   private harnessLifecycle: HarnessLifecycle = 'stopped'
   private harnessMessage: string | undefined
+  private pluginFailure: PluginInitializationFailure | undefined
   private harnessVersion: string | undefined
   private harnessUrl: string | undefined
   private harnessLoadId = 0
@@ -36,10 +38,13 @@ export class WindowController {
   private theme: ColorTheme = nativeTheme.shouldUseDarkColors ? 'dark' : 'light'
   private themeProbeTimer: NodeJS.Timeout | undefined
   private themeProbeInFlight = false
+  private pluginFailureProbeTimer: NodeJS.Timeout | undefined
+  private pluginFailureProbeInFlight = false
 
   constructor(
     private readonly runtime: HarnessRuntimeManager,
     private readonly development: DevelopmentService,
+    private readonly pluginRecovery?: PluginRecoveryService,
   ) {
     this.runtime.on('update-state', () => this.publishState())
     this.development.on('state', () => this.publishState())
@@ -87,6 +92,7 @@ export class WindowController {
     window.on('unmaximize', () => this.publishState())
     window.on('closed', () => {
       this.stopThemeSync()
+      this.stopPluginFailureProbe()
       this.cancelPendingHarnessLoad(new Error('桌面窗口已关闭。'))
       this.window = undefined
     })
@@ -98,6 +104,10 @@ export class WindowController {
     if (!developerToolsEnabled) {
       window.webContents.on('devtools-opened', () => window.webContents.closeDevTools())
     }
+    window.webContents.on('before-input-event', (event, input) => {
+      const key = input.key.toLowerCase()
+      if (key === 'f5' || (key === 'r' && (input.control || input.meta))) event.preventDefault()
+    })
     window.webContents.on('will-frame-navigate', (details) => {
       if (details.isMainFrame) return
       if (this.safeOrigin(details.url) === this.harnessOrigin) return
@@ -107,12 +117,18 @@ export class WindowController {
       }
     })
     window.webContents.on('did-frame-navigate', (_event, url, _code, _status, isMainFrame) => {
-      if (!isMainFrame && this.safeOrigin(url) === this.harnessOrigin) this.handleHarnessFrameLoaded(url)
+      if (!isMainFrame && this.safeOrigin(url) === this.harnessOrigin) {
+        this.handleHarnessFrameLoaded(url)
+        void this.detectHarnessPluginFailure()
+      }
     })
     window.webContents.on('did-frame-finish-load', (_event, isMainFrame) => {
       if (isMainFrame) return
       const frame = this.findHarnessFrame()
-      if (frame !== undefined) this.handleHarnessFrameLoaded(frame.url)
+      if (frame !== undefined) {
+        this.handleHarnessFrameLoaded(frame.url)
+        void this.detectHarnessPluginFailure()
+      }
     })
     window.webContents.on('did-fail-load', (_event, code, description, validatedUrl, isMainFrame) => {
       if (isMainFrame || code === -3 || this.safeOrigin(validatedUrl) !== this.harnessOrigin) return
@@ -139,11 +155,13 @@ export class WindowController {
 
   setRuntimePreparing(): void {
     this.stopThemeSync()
+    this.stopPluginFailureProbe()
     this.cancelPendingHarnessLoad(new Error('Harness 运行时正在准备。'))
     this.harnessVersion = undefined
     this.harnessUrl = undefined
     this.harnessOrigin = undefined
     this.harnessLifecycle = 'starting'
+    this.pluginFailure = undefined
     this.harnessMessage = app.isPackaged && process.platform === 'win32'
       ? '首次启动正在解压 Harness 运行时，请稍候…'
       : '正在准备本地 Harness 运行时…'
@@ -152,11 +170,13 @@ export class WindowController {
 
   setHarnessStarting(version: string): void {
     this.stopThemeSync()
+    this.stopPluginFailureProbe()
     this.cancelPendingHarnessLoad(new Error('Harness 启动目标已变更。'))
     this.harnessVersion = version
     this.harnessUrl = undefined
     this.harnessOrigin = undefined
     this.harnessLifecycle = 'starting'
+    this.pluginFailure = undefined
     this.harnessMessage = '正在启动 Harness…'
     this.publishState()
   }
@@ -168,6 +188,7 @@ export class WindowController {
     this.harnessLoadId += 1
     this.harnessOrigin = new URL(url).origin
     this.harnessLifecycle = 'starting'
+    this.pluginFailure = undefined
     this.harnessMessage = '正在加载 Harness 界面…'
 
     const loadPromise = new Promise<void>((resolve, reject) => {
@@ -187,11 +208,13 @@ export class WindowController {
     await loadPromise
   }
 
-  setHarnessError(message: string): void {
+  setHarnessError(message: string, pluginFailure?: PluginInitializationFailure): void {
     this.stopThemeSync()
+    this.stopPluginFailureProbe()
     this.cancelPendingHarnessLoad(new Error(message))
     this.harnessLifecycle = 'error'
     this.harnessMessage = message
+    this.pluginFailure = pluginFailure
     this.harnessUrl = undefined
     this.harnessOrigin = undefined
     this.publishState()
@@ -210,14 +233,27 @@ export class WindowController {
     return window !== undefined && !window.isDestroyed() ? window : undefined
   }
 
+  focusHarnessSession(sessionId: string): void {
+    if (sessionId.length === 0 || sessionId.length > 240 || /[\r\n\0]/u.test(sessionId)) return
+    this.focus()
+    const frame = this.findHarnessFrame()
+    if (frame === undefined) return
+    const message = JSON.stringify({
+      source: 'deepseek-harness-desktop',
+      type: 'notification-click',
+      sessionId,
+    })
+    void frame.executeJavaScript(`window.postMessage(${message}, location.origin)`).catch(() => undefined)
+  }
+
   private registerIpc(): void {
     this.ipcRegistered = true
     ipcMain.handle('desktop:get-state', () => this.getState())
     ipcMain.handle('desktop:window-action', (_event, action: WindowAction) => this.windowAction(action))
-    ipcMain.handle('desktop:navigate', (_event, action: NavigationAction) => this.navigate(action))
     ipcMain.handle('desktop:harness-frame-loaded', (event, url: string) => {
       if (event.sender !== this.window?.webContents) return
       this.handleHarnessFrameLoaded(url)
+      void this.detectHarnessPluginFailure()
     })
     ipcMain.handle('desktop:title-menu-action', (_event, action: TitleMenuAction) => this.titleMenuAction(action))
     ipcMain.handle('desktop:check-update', () => this.runtime.checkForUpdates())
@@ -229,6 +265,8 @@ export class WindowController {
     ipcMain.handle('desktop:development-choose-patch', () => this.development.choosePatch())
     ipcMain.handle('desktop:development-clear-patch', () => this.development.clearPatch())
     ipcMain.handle('desktop:development-restart', () => this.development.restartHarness())
+    ipcMain.handle('desktop:plugin-recovery-disable', async () => await this.recoverFailedPlugin())
+    ipcMain.handle('desktop:plugin-recovery-restore', async (_event, entryId: string) => await this.restoreRecoveredPlugin(entryId))
     ipcMain.handle('desktop:development-run-plugin', (_event, request: DevelopmentPluginRequest) => this.development.runPlugin(request))
   }
 
@@ -237,10 +275,6 @@ export class WindowController {
     if (action === 'minimize') window.minimize()
     else if (action === 'toggle-maximize') window.isMaximized() ? window.unmaximize() : window.maximize()
     else if (action === 'close') window.close()
-  }
-
-  private navigate(action: NavigationAction): void {
-    if (action === 'reload') this.findHarnessFrame()?.reload()
   }
 
   private handleHarnessFrameLoaded(url: string): void {
@@ -253,7 +287,9 @@ export class WindowController {
     this.stopHarnessLoadProbe()
     this.harnessLifecycle = 'ready'
     this.harnessMessage = undefined
+    this.pluginFailure = undefined
     this.startThemeSync()
+    this.startPluginFailureProbe()
     this.publishState()
     pending.resolve()
   }
@@ -284,6 +320,8 @@ export class WindowController {
       harnessLoadId: this.harnessLoadId,
       harnessLifecycle: this.harnessLifecycle,
       ...(this.harnessMessage !== undefined ? { harnessMessage: this.harnessMessage } : {}),
+      ...(this.pluginFailure !== undefined ? { pluginFailure: { ...this.pluginFailure } } : {}),
+      disabledPlugins: this.pluginRecovery?.disabledPlugins ?? [],
       updateStatus: update.status,
       ...(update.version !== undefined ? { updateVersion: update.version } : {}),
       ...(update.message !== undefined ? { updateMessage: update.message } : {}),
@@ -351,6 +389,56 @@ export class WindowController {
   private stopHarnessLoadProbe(): void {
     if (this.harnessLoadProbeTimer !== undefined) clearTimeout(this.harnessLoadProbeTimer)
     this.harnessLoadProbeTimer = undefined
+  }
+
+  private async recoverFailedPlugin(): Promise<void> {
+    if (this.pluginRecovery === undefined) throw new Error('插件恢复服务不可用。')
+    const failure = this.pluginFailure
+    if (failure === undefined) throw new Error('当前没有可恢复的插件初始化错误。')
+    await this.pluginRecovery.disable(failure)
+    await this.development.restartHarness()
+  }
+
+  private async restoreRecoveredPlugin(entryId: string): Promise<void> {
+    if (this.pluginRecovery === undefined) throw new Error('插件恢复服务不可用。')
+    await this.pluginRecovery.restore(entryId)
+    await this.development.restartHarness()
+  }
+
+  private startPluginFailureProbe(): void {
+    this.stopPluginFailureProbe()
+    const deadline = Date.now() + 5_000
+    const probe = (): void => {
+      if (Date.now() >= deadline) {
+        this.stopPluginFailureProbe()
+        return
+      }
+      void this.detectHarnessPluginFailure()
+    }
+    probe()
+    this.pluginFailureProbeTimer = setInterval(probe, 200)
+  }
+
+  private stopPluginFailureProbe(): void {
+    if (this.pluginFailureProbeTimer !== undefined) clearInterval(this.pluginFailureProbeTimer)
+    this.pluginFailureProbeTimer = undefined
+  }
+
+  private async detectHarnessPluginFailure(): Promise<void> {
+    if (this.pluginFailureProbeInFlight || this.harnessOrigin === undefined) return
+    const frame = this.findHarnessFrame()
+    if (frame === undefined) return
+    this.pluginFailureProbeInFlight = true
+    try {
+      const text = await frame.executeJavaScript(`(document.body?.innerText ?? '').slice(0, 32000)`) as string
+      const failure = parsePluginInitializationFailure(text)
+      if (failure === undefined) return
+      this.setHarnessError(`插件“${failure.pluginName}”初始化失败：${failure.detail}`, failure)
+    } catch {
+      // The Harness iframe can be replaced while a restart is in progress.
+    } finally {
+      this.pluginFailureProbeInFlight = false
+    }
   }
 
   private startThemeSync(): void {

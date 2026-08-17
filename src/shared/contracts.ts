@@ -20,6 +20,16 @@ export interface DevelopmentPluginRequest {
   argumentsText: string
 }
 
+export interface PluginRecoveryEntry {
+  entryId: string
+  pluginName: string
+}
+
+export interface PluginInitializationFailure extends PluginRecoveryEntry {
+  detail: string
+  recoverable: boolean
+}
+
 export interface DesktopState {
   appVersion: string
   platform: DesktopPlatform
@@ -29,6 +39,8 @@ export interface DesktopState {
   harnessLoadId: number
   harnessLifecycle: HarnessLifecycle
   harnessMessage?: string
+  pluginFailure?: PluginInitializationFailure
+  disabledPlugins: PluginRecoveryEntry[]
   updateStatus: HarnessUpdateStatus
   updateVersion?: string
   updateMessage?: string
@@ -37,13 +49,11 @@ export interface DesktopState {
 }
 
 export type WindowAction = 'minimize' | 'toggle-maximize' | 'close'
-export type NavigationAction = 'reload'
 export type TitleMenuAction = 'update' | 'open-changes'
 
 export interface DesktopBridge {
   getState(): Promise<DesktopState>
   windowAction(action: WindowAction): Promise<void>
-  navigate(action: NavigationAction): Promise<void>
   reportHarnessFrameLoaded(url: string): Promise<void>
   titleMenuAction(action: TitleMenuAction): Promise<void>
   checkForHarnessUpdate(): Promise<void>
@@ -51,6 +61,8 @@ export interface DesktopBridge {
   chooseDevelopmentPatch(): Promise<void>
   clearDevelopmentPatch(): Promise<void>
   restartHarnessForDevelopment(): Promise<void>
+  recoverFailedPlugin(): Promise<void>
+  restoreRecoveredPlugin(entryId: string): Promise<void>
   runDevelopmentPlugin(request: DevelopmentPluginRequest): Promise<void>
   onState(listener: (state: DesktopState) => void): () => void
 }

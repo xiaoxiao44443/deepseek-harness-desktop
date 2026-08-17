@@ -1,4 +1,4 @@
-import { app, dialog } from 'electron'
+import { app, dialog, nativeTheme, systemPreferences } from 'electron'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { HarnessProcess } from './harness-process.js'
@@ -9,6 +9,24 @@ import { HarnessToolchainManager } from './harness-toolchain.js'
 import { DevelopmentService } from './development-service.js'
 import type { DevelopmentSettings } from './development-settings.js'
 import { HarnessDesktopBridgeHost } from './harness-desktop-bridge.js'
+import { DesktopNotificationService } from './desktop-notifications.js'
+import { PluginInitializationError, PluginRecoveryService } from './plugin-recovery.js'
+
+// Chromium may not propagate macOS' dark color-scheme media query into the
+// cross-origin Harness iframe. Preserve explicit Harness light/dark choices,
+// but make its default `system` preference resolve to the current dark OS
+// appearance from the first paint.
+const macSystemDark = process.platform === 'darwin'
+  && (() => {
+    try {
+      return systemPreferences.getUserDefault('AppleInterfaceStyle', 'string') === 'Dark'
+    } catch {
+      return nativeTheme.shouldUseDarkColors
+    }
+  })()
+if (macSystemDark) {
+  app.commandLine.appendSwitch('force-dark-mode')
+}
 
 app.setName('DeepSeek Harness')
 if (process.platform === 'win32') app.setAppUserModelId('com.saltfish.deepseek-harness-desktop')
@@ -90,12 +108,17 @@ if (!app.requestSingleInstanceLock()) {
       bundledArchivePath,
       packagedNpmCli,
     )
+    const pluginRecovery = new PluginRecoveryService(
+      join(app.getPath('userData'), 'plugin-recovery.patch.json'),
+    )
+    await pluginRecovery.initialize()
     const launchHarness = async (settings: DevelopmentSettings): Promise<void> => {
       if (runtime === undefined || windows === undefined || harness === undefined) {
         throw new Error('桌面运行时尚未准备完成。')
       }
       let started = false
       const failures: string[] = []
+      let pluginFailure: PluginInitializationError | undefined
       for (const candidate of await runtime.launchCandidates()) {
         windows.setHarnessStarting(candidate.version)
         try {
@@ -109,14 +132,20 @@ if (!app.requestSingleInstanceLock()) {
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
           failures.push(`${candidate.version} (${candidate.source}): ${message}`)
+          if (error instanceof PluginInitializationError) {
+            pluginFailure = error
+            break
+          }
           // A user-supplied patch can fail independently from the runtime. Do
           // not blacklist an otherwise healthy auto-updated Harness version.
           if (settings.patchPath === undefined) await runtime.markFailed(candidate, message)
         }
       }
       if (!started) {
-        const message = `无法启动 DeepSeek Harness。${failures.join('；')}`
-        windows.setHarnessError(message)
+        const message = pluginFailure === undefined
+          ? `无法启动 DeepSeek Harness。${failures.join('；')}`
+          : `插件“${pluginFailure.failure.pluginName}”初始化失败：${pluginFailure.failure.detail}`
+        windows.setHarnessError(message, pluginFailure?.failure)
         throw new Error(message)
       }
     }
@@ -135,7 +164,7 @@ if (!app.requestSingleInstanceLock()) {
     )
     await development.initialize()
     debugLog('[desktop] creating startup window')
-    windows = new WindowController(runtime, development)
+    windows = new WindowController(runtime, development, pluginRecovery)
     windows.setRuntimePreparing()
     await windows.create()
     debugLog('[desktop] startup window created; resolving Harness runtime')
@@ -148,13 +177,23 @@ if (!app.requestSingleInstanceLock()) {
     )
     const directoryPickerUrl = await directoryPicker.start()
     const toolchain = new HarnessToolchainManager(app.getPath('userData'), process.execPath)
-    const desktopBridgePluginEntry = app.isPackaged
-      ? join(process.resourcesPath, 'dsh-desktop-bridge', 'lib', 'index.js')
-      : join(app.getAppPath(), 'resources', 'dsh-desktop-bridge', 'lib', 'index.js')
+    const desktopBridgePluginRoot = app.isPackaged
+      ? join(process.resourcesPath, 'dsh-desktop-bridge')
+      : join(app.getAppPath(), 'resources', 'dsh-desktop-bridge')
+    const notifications = new DesktopNotificationService(
+      join(app.getPath('userData'), 'notifications.json'),
+      {
+        getWindow: () => windows?.getBrowserWindow(),
+        openSession: (sessionId) => windows?.focusHarnessSession(sessionId),
+      },
+    )
+    await notifications.initialize()
     desktopBridge = new HarnessDesktopBridgeHost({
       userDataPath: app.getPath('userData'),
-      pluginEntryPath: desktopBridgePluginEntry,
+      pluginName: 'dsh-desktop-bridge',
+      pluginRootPath: desktopBridgePluginRoot,
       profilePath: join(runtime.harnessHome, 'profiles', 'web'),
+      notifications,
       restartHarness: async () => {
         if (development === undefined) throw new Error('Harness 开发服务尚未准备完成。')
         await development.restartHarness()
@@ -167,6 +206,7 @@ if (!app.requestSingleInstanceLock()) {
       directoryPickerUrl,
       toolchain,
       desktopBridgeLaunch,
+      pluginRecovery.patchPath,
     )
     harness.on('log', (stream: string, message: string) => {
       const output = `[harness:${stream}] ${message.trimEnd()}`

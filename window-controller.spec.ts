@@ -96,6 +96,47 @@ describe('WindowController Harness reload', () => {
     expect(readyState).toMatchObject({ harnessLoadId: 2, harnessLifecycle: 'ready' })
   })
 
+  it('blocks keyboard reload shortcuts at the main window boundary', async () => {
+    const runtime = Object.assign(new EventEmitter(), {
+      harnessHome: '/path/that/does/not/exist',
+      updateState: { status: 'idle' },
+      checkForUpdates: vi.fn(),
+    })
+    const development = Object.assign(new EventEmitter(), {
+      state: { pnpmVersion: '11.19.0', restarting: false, commandRunning: false },
+      choosePatch: vi.fn(),
+      clearPatch: vi.fn(),
+      restartHarness: vi.fn(),
+      runPlugin: vi.fn(),
+    })
+    const controller = new WindowController(runtime as never, development as never)
+    await controller.create()
+
+    const commandReload = { preventDefault: vi.fn() }
+    electronMocks.window?.webContents.emit('before-input-event', commandReload, {
+      key: 'r',
+      control: false,
+      meta: true,
+    })
+    expect(commandReload.preventDefault).toHaveBeenCalledOnce()
+
+    const f5Reload = { preventDefault: vi.fn() }
+    electronMocks.window?.webContents.emit('before-input-event', f5Reload, {
+      key: 'F5',
+      control: false,
+      meta: false,
+    })
+    expect(f5Reload.preventDefault).toHaveBeenCalledOnce()
+
+    const plainR = { preventDefault: vi.fn() }
+    electronMocks.window?.webContents.emit('before-input-event', plainR, {
+      key: 'r',
+      control: false,
+      meta: false,
+    })
+    expect(plainR.preventDefault).not.toHaveBeenCalled()
+  })
+
   it('detects a ready Harness frame even when renderer load events are missed', async () => {
     const runtime = Object.assign(new EventEmitter(), {
       harnessHome: '/path/that/does/not/exist',
