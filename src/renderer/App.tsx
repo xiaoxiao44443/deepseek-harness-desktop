@@ -144,7 +144,7 @@ function DevelopmentPanel({
             <button className="compact-button" type="button" disabled={state.restarting} onClick={() => void runAction(() => desktopApi.chooseDevelopmentPatch())}>选择文件</button>
             <button className="compact-button subtle" type="button" disabled={!patchPath || state.restarting} onClick={() => void runAction(() => desktopApi.clearDevelopmentPatch())}>清除</button>
           </div>
-          <div className="section-actions"><button className="dialog-button primary" type="button" disabled={state.restarting} onClick={() => void runAction(() => desktopApi.restartHarnessForDevelopment())}>{state.restarting ? '正在重启…' : '重启并应用'}</button></div>
+          <div className="section-actions"><button className="dialog-button primary" type="button" disabled={state.restarting} onClick={() => void runAction(() => desktopApi.restartHarnessForDevelopment())}>{state.restarting ? '正在重启…' : patchPath ? '重启并应用' : '重启 Harness'}</button></div>
         </section>
 
         <section className="development-section">
@@ -214,6 +214,7 @@ export function App(): ReactNode {
 
   const update = useMemo(() => state === undefined ? undefined : updatePresentation(state), [state])
   const ready = state?.harnessLifecycle === 'ready'
+  const preparingRuntime = state?.harnessLifecycle === 'starting' && state.harnessVersion === undefined
   const harnessUrl = state?.harnessUrl ?? ''
   const availableUpdate = state?.updateVersion !== undefined && state.updateVersion !== state.harnessVersion
   const patchEnabled = Boolean(state?.development.patchPath)
@@ -225,7 +226,7 @@ export function App(): ReactNode {
         {!ready ? (
           <section className={`startup ${state?.harnessLifecycle === 'error' ? 'error' : ''}`}>
             <div className="loader" aria-hidden="true" />
-            <h1 id="startup-title">{state?.harnessLifecycle === 'error' ? 'DeepSeek Harness 启动失败' : '正在启动 DeepSeek Harness'}</h1>
+            <h1 id="startup-title">{state?.harnessLifecycle === 'error' ? 'DeepSeek Harness 启动失败' : preparingRuntime ? '正在准备 DeepSeek Harness' : '正在启动 DeepSeek Harness'}</h1>
             <p id="startup-message">{state?.harnessMessage ?? '正在准备本地 Harness 服务…'}</p>
             {state?.harnessLifecycle === 'error' ? <button className="secondary-button" type="button" onClick={() => void desktopApi.checkForHarnessUpdate()}>重新检查更新</button> : null}
           </section>

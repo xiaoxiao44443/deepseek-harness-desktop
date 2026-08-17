@@ -16,13 +16,14 @@
     "build:renderer": "vite build",
     "postinstall": "node node_modules/electron/install.js",
     "prepare:runtime": "node scripts/prepare-bundled-harness.mjs",
+    "prepare:mac-icon": "node scripts/prepare-macos-icon.mjs",
     "dev": "pnpm run build:main && concurrently -k -s first \"vite\" \"wait-on http-get://127.0.0.1:5173 && cross-env HARNESS_DESKTOP_RENDERER_URL=http://127.0.0.1:5173 electron . --dev\"",
     "start": "electron .",
     "test": "vitest run --config vitest.config.ts",
     "test:watch": "vitest --config vitest.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
     "package:win": "pnpm run build && pnpm run prepare:runtime && electron-builder --win nsis --publish never",
-    "package:mac:intel": "pnpm run build && pnpm run prepare:runtime && electron-builder --mac dmg zip --x64 --publish never"
+    "package:mac:intel": "pnpm run build && pnpm run prepare:runtime && pnpm run prepare:mac-icon && electron-builder --mac dmg zip --x64 --publish never"
   },
   "dependencies": {
     "lucide-react": "1.30.0",
@@ -58,15 +59,26 @@
     "extraResources": [
       { "from": "app-icon.png", "to": "app-icon.png" },
       { "from": "titlebar-icon.png", "to": "titlebar-icon.png" },
-      { "from": "build/harness-runtime.tgz", "to": "harness-runtime.tgz" }
+      { "from": "resources/dsh-desktop-bridge", "to": "dsh-desktop-bridge" }
     ],
     "win": {
       "icon": "app-icon.png",
+      "extraResources": [
+        { "from": "build/harness-runtime.tgz", "to": "harness-runtime.tgz" }
+      ],
       "target": [{ "target": "nsis", "arch": ["x64"] }],
       "artifactName": "DeepSeek-Harness-Desktop-${version}-${arch}.${ext}"
     },
     "mac": {
-      "icon": "app-icon.png",
+      "icon": "build/app-icon.icns",
+      "extraResources": [
+        { "from": "build", "to": ".", "filter": ["harness-runtime/**/*"] },
+        { "from": "resources/mac-locales", "to": ".", "filter": ["**/*"] }
+      ],
+      "extendInfo": {
+        "CFBundleDevelopmentRegion": "en",
+        "CFBundleLocalizations": ["en", "zh-Hans", "zh-Hant"]
+      },
       "category": "public.app-category.developer-tools",
       "minimumSystemVersion": "12.0.0",
       "identity": null,

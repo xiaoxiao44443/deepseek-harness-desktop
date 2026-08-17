@@ -8,6 +8,7 @@ import { DirectoryPickerBridge } from './directory-picker-bridge.js'
 import { HarnessToolchainManager } from './harness-toolchain.js'
 import { DevelopmentService } from './development-service.js'
 import type { DevelopmentSettings } from './development-settings.js'
+import { HarnessDesktopBridgeHost } from './harness-desktop-bridge.js'
 
 app.setName('DeepSeek Harness')
 if (process.platform === 'win32') app.setAppUserModelId('com.saltfish.deepseek-harness-desktop')
@@ -52,6 +53,7 @@ if (!app.requestSingleInstanceLock()) {
   let runtime: HarnessRuntimeManager | undefined
   let directoryPicker: DirectoryPickerBridge | undefined
   let development: DevelopmentService | undefined
+  let desktopBridge: HarnessDesktopBridgeHost | undefined
   let quitting = false
 
   app.on('second-instance', () => windows?.focus())
@@ -60,6 +62,7 @@ if (!app.requestSingleInstanceLock()) {
     runtime?.stopAutomaticChecks()
     void harness?.stop()
     void directoryPicker?.stop()
+    void desktopBridge?.stop()
   })
   app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })
   app.on('activate', () => { if (!quitting) void windows?.create() })
@@ -68,10 +71,15 @@ if (!app.requestSingleInstanceLock()) {
     debugLog('[desktop] waiting for Electron ready')
     await app.whenReady()
     debugLog('[desktop] Electron ready; resolving Harness runtime')
+    const usesPackagedRuntimeDirectory = app.isPackaged && process.platform === 'darwin'
     const bundledRuntimeRoot = app.isPackaged
-      ? join(app.getPath('userData'), 'harness-runtime', 'bundled', app.getVersion())
+      ? usesPackagedRuntimeDirectory
+        ? join(process.resourcesPath, 'harness-runtime')
+        : join(app.getPath('userData'), 'harness-runtime', 'bundled', app.getVersion())
       : undefined
-    const bundledArchivePath = app.isPackaged ? join(process.resourcesPath, 'harness-runtime.tgz') : undefined
+    const bundledArchivePath = app.isPackaged && !usesPackagedRuntimeDirectory
+      ? join(process.resourcesPath, 'harness-runtime.tgz')
+      : undefined
     const packagedNpmCli = app.isPackaged
       ? join(bundledRuntimeRoot as string, 'node_modules', 'npm', 'bin', 'npm-cli.js')
       : undefined
@@ -82,7 +90,6 @@ if (!app.requestSingleInstanceLock()) {
       bundledArchivePath,
       packagedNpmCli,
     )
-    await runtime.initialize()
     const launchHarness = async (settings: DevelopmentSettings): Promise<void> => {
       if (runtime === undefined || windows === undefined || harness === undefined) {
         throw new Error('桌面运行时尚未准备完成。')
@@ -127,10 +134,13 @@ if (!app.requestSingleInstanceLock()) {
       },
     )
     await development.initialize()
-    debugLog('[desktop] Harness runtime resolved; creating window')
+    debugLog('[desktop] creating startup window')
     windows = new WindowController(runtime, development)
+    windows.setRuntimePreparing()
     await windows.create()
-    debugLog('[desktop] window created; starting Harness')
+    debugLog('[desktop] startup window created; resolving Harness runtime')
+    await runtime.initialize()
+    debugLog('[desktop] Harness runtime resolved; starting Harness')
 
     directoryPicker = new DirectoryPickerBridge(
       () => windows?.getBrowserWindow(),
@@ -138,11 +148,25 @@ if (!app.requestSingleInstanceLock()) {
     )
     const directoryPickerUrl = await directoryPicker.start()
     const toolchain = new HarnessToolchainManager(app.getPath('userData'), process.execPath)
+    const desktopBridgePluginEntry = app.isPackaged
+      ? join(process.resourcesPath, 'dsh-desktop-bridge', 'lib', 'index.js')
+      : join(app.getAppPath(), 'resources', 'dsh-desktop-bridge', 'lib', 'index.js')
+    desktopBridge = new HarnessDesktopBridgeHost({
+      userDataPath: app.getPath('userData'),
+      pluginEntryPath: desktopBridgePluginEntry,
+      profilePath: join(runtime.harnessHome, 'profiles', 'web'),
+      restartHarness: async () => {
+        if (development === undefined) throw new Error('Harness 开发服务尚未准备完成。')
+        await development.restartHarness()
+      },
+    })
+    const desktopBridgeLaunch = await desktopBridge.start()
     harness = new HarnessProcess(
       process.execPath,
       app.getPath('home'),
       directoryPickerUrl,
       toolchain,
+      desktopBridgeLaunch,
     )
     harness.on('log', (stream: string, message: string) => {
       const output = `[harness:${stream}] ${message.trimEnd()}`

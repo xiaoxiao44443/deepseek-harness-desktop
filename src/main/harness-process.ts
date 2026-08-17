@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import type { Readable } from 'node:stream'
 import type { HarnessRuntimeCandidate } from './harness-runtime.js'
 import { HarnessToolchainManager, prependToolchainToPath } from './harness-toolchain.js'
+import type { HarnessDesktopBridgeLaunch } from './harness-desktop-bridge.js'
 
 const URL_PATTERN = /dsh web:\s+(http:\/\/127\.0\.0\.1:\d+)/u
 const START_TIMEOUT_MS = 90_000
@@ -37,6 +38,7 @@ export class HarnessProcess extends EventEmitter {
     private readonly workspacePath: string,
     private readonly directoryPickerUrl: string,
     private readonly toolchainManager: HarnessToolchainManager,
+    private readonly desktopBridge: HarnessDesktopBridgeLaunch,
   ) { super() }
 
   async start(candidate: HarnessRuntimeCandidate, options: HarnessLaunchOptions = {}): Promise<RunningHarness> {
@@ -44,8 +46,9 @@ export class HarnessProcess extends EventEmitter {
     const toolchain = await this.toolchainManager.prepare(candidate)
     this.stopping = false
     const environment = prependToolchainToPath(process.env, toolchain.binPath)
-    const harnessArgs = ['web', '--port', '0']
+    const harnessArgs = ['web', '--patch', this.desktopBridge.patchPath]
     if (options.patchPath !== undefined) harnessArgs.push('--patch', options.patchPath)
+    harnessArgs.push('--port', '0')
     const child = spawn(this.electronExecutable, [
       '--expose-internals', HARNESS_BOOTSTRAP, candidate.entryPath, ...harnessArgs,
     ], {
@@ -57,6 +60,9 @@ export class HarnessProcess extends EventEmitter {
         DSH_DESKTOP_DSH_COMMAND: toolchain.dshCommand,
         DSH_DESKTOP_PNPM_COMMAND: toolchain.pnpmCommand,
         DSH_DESKTOP_DIRECTORY_PICKER_URL: this.directoryPickerUrl,
+        DSH_DESKTOP_CONTROL_URL: this.desktopBridge.controlUrl,
+        DSH_DESKTOP_CONTROL_TOKEN: this.desktopBridge.controlToken,
+        DSH_DESKTOP_PROFILE_PATH: this.desktopBridge.profilePath,
         ELECTRON_RUN_AS_NODE: '1',
         ELECTRON_NO_ATTACH_CONSOLE: '1',
         FORCE_COLOR: '0',

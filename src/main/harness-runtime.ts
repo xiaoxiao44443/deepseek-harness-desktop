@@ -13,7 +13,7 @@ import { applyHarnessRuntimeCompatibility } from './runtime-compat.js'
 const require = createRequire(import.meta.url)
 const HARNESS_PACKAGE = '@deepseek-ai/dsh'
 export const DESKTOP_PNPM_VERSION = '11.19.0'
-const BUNDLED_RUNTIME_POLICY_VERSION = 2
+const BUNDLED_RUNTIME_POLICY_VERSION = 3
 const REGISTRY_METADATA = 'https://registry.npmjs.org/@deepseek-ai%2Fdsh'
 const UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000
 const INSTALL_SCRIPT_POLICY = {

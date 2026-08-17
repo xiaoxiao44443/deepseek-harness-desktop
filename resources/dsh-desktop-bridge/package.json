@@ -1,0 +1,9 @@
+{
+  "name": "@saltfish/dsh-desktop-bridge",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness Desktop host integration bridge",
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": "./lib/index.js",
+  "private": true
+}
