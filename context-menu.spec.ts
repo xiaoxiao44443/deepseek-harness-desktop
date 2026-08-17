@@ -90,6 +90,30 @@ describe('desktop context menu protocol', () => {
     expect(withSelection.some((entry) => entry.kind === 'item' && entry.id === 'desktop.copy')).toBe(true)
   })
 
+  it('offers one copy action for image contents', () => {
+    const items = buildBuiltinContextMenuItems({
+      isEditable: false,
+      selectionText: '',
+      linkURL: '',
+      mediaType: 'image',
+      hasImageContents: true,
+      editFlags: {
+        canUndo: false,
+        canRedo: false,
+        canCut: false,
+        canCopy: false,
+        canPaste: false,
+        canDelete: false,
+        canSelectAll: true,
+        canEditRichly: false,
+      },
+    })
+
+    expect(items.filter((entry) => entry.kind === 'item')).toEqual([
+      { kind: 'item', id: 'desktop.copy-image', label: '复制', enabled: true, icon: 'copy' },
+    ])
+  })
+
   it('places plugin contributions behind a stable separator', () => {
     expect(appendPluginContextMenuItems(
       [{ kind: 'item', id: 'desktop.copy', label: '复制', enabled: true }],

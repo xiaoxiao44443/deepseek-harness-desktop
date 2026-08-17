@@ -2,7 +2,7 @@ import { ChevronDown, Code2, Copy, Minus, Square, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { DesktopState, DevelopmentState, PluginRecoveryEntry, TitleMenuAction } from '../shared/contracts.js'
-import type { DesktopContextMenuRequest } from '../shared/context-menu.js'
+import type { ContextMenuPointerReplay, DesktopContextMenuRequest } from '../shared/context-menu.js'
 import { ContextMenu } from './ContextMenu.js'
 import appIconUrl from '../../app-icon.png'
 import titlebarIconUrl from '../../titlebar-icon.png'
@@ -254,22 +254,22 @@ export function App(): ReactNode {
   const patchEnabled = Boolean(state?.development.patchPath)
   const pluginFailure = state?.pluginFailure
 
-  const dismissContextMenu = useCallback((restoreFocus = true): void => {
+  const dismissContextMenu = useCallback((restoreFocus = true, replayPointer?: ContextMenuPointerReplay): void => {
     const current = contextMenuRef.current
-    if (current !== undefined) void desktopApi.dismissContextMenu(current.requestId, restoreFocus)
     contextMenuRef.current = undefined
     setContextMenu(undefined)
+    if (current !== undefined) void desktopApi.dismissContextMenu(current.requestId, restoreFocus, replayPointer)
   }, [])
 
   const selectContextMenuItem = useCallback((itemId: string): void => {
     const current = contextMenuRef.current
     if (current === undefined) return
+    contextMenuRef.current = undefined
+    setContextMenu(undefined)
     void desktopApi.selectContextMenuItem({
       requestId: current.requestId,
       itemId,
     })
-    contextMenuRef.current = undefined
-    setContextMenu(undefined)
   }, [])
 
   useEffect(() => {
@@ -346,7 +346,11 @@ export function App(): ReactNode {
       ) : null}
 
       {contextMenu === undefined ? null : (
-        <ContextMenu menu={contextMenu} onSelect={selectContextMenuItem} onDismiss={dismissContextMenu} />
+        <ContextMenu
+          menu={contextMenu}
+          onSelect={selectContextMenuItem}
+          onDismiss={(replayPointer) => dismissContextMenu(replayPointer === undefined, replayPointer)}
+        />
       )}
 
       <Modal open={releaseNotesOpen} labelledBy="release-notes-title" closeLabel="关闭版本说明" onClose={() => { setReleaseNotesOpen(false); requestAnimationFrame(focusHarness) }}>

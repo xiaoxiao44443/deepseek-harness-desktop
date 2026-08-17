@@ -49,6 +49,12 @@ export interface DesktopContextMenuActionRequest {
   itemId: string
 }
 
+export interface ContextMenuPointerReplay {
+  x: number
+  y: number
+  button: 'left' | 'middle' | 'right'
+}
+
 export interface PluginContextMenuCollection {
   token: string
   items: ContextMenuEntry[]

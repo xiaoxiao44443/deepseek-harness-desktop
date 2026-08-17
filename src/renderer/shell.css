@@ -368,7 +368,7 @@ body.maximized .restore-icon { display: block; }
 
 .context-menu-backdrop {
   position: fixed;
-  z-index: 64;
+  z-index: 90;
   inset: 0;
   padding: 0;
   border: 0;
@@ -377,7 +377,7 @@ body.maximized .restore-icon { display: block; }
 
 .context-menu-card {
   position: fixed;
-  z-index: 65;
+  z-index: 91;
   display: grid;
   width: max-content;
   min-width: 164px;

@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises'
 import { app, BrowserWindow, clipboard, ipcMain, nativeTheme, shell } from 'electron'
 import type { ContextMenuParams, WebFrameMain } from 'electron'
 import type { ColorTheme, DesktopPlatform, DesktopState, DevelopmentPluginRequest, HarnessLifecycle, PluginInitializationFailure, TitleMenuAction, WindowAction } from '../shared/contracts.js'
-import type { DesktopContextMenuActionRequest, DesktopContextMenuRequest, PluginContextMenuCollection } from '../shared/context-menu.js'
+import type { ContextMenuPointerReplay, DesktopContextMenuActionRequest, DesktopContextMenuRequest, PluginContextMenuCollection } from '../shared/context-menu.js'
 import { parsePluginContextMenuCollection } from '../shared/context-menu.js'
 import type { HarnessRuntimeManager } from './harness-runtime.js'
 import type { DevelopmentService } from './development-service.js'
@@ -29,6 +29,8 @@ interface PendingHarnessLoad {
 interface PendingDesktopContextMenu {
   requestId: string
   frame: WebFrameMain
+  x: number
+  y: number
   linkURL: string
   selectionText: string
   allowedItemIds: Set<string>
@@ -125,7 +127,7 @@ export class WindowController {
       if (key === 'f5' || (key === 'r' && (input.control || input.meta))) event.preventDefault()
     })
     window.webContents.on('context-menu', (event, params) => {
-      if (!this.isHarnessContextMenu(params)) return
+      if (!this.isSupportedContextMenu(params)) return
       event.preventDefault()
       void this.openContextMenu(params)
     })
@@ -297,35 +299,54 @@ export class WindowController {
       if (event.sender !== this.window?.webContents) return
       await this.selectContextMenuItem(request)
     })
-    ipcMain.handle('desktop:context-menu-dismiss', async (event, requestId: string, restoreFocus: boolean) => {
+    ipcMain.handle('desktop:context-menu-dismiss', async (event, requestId: string, restoreFocus: boolean, replayPointer: unknown) => {
       if (event.sender !== this.window?.webContents) return
-      await this.dismissContextMenu(requestId, restoreFocus !== false)
+      await this.dismissContextMenu(requestId, restoreFocus !== false, replayPointer)
     })
   }
 
   private isHarnessContextMenu(params: ContextMenuParams): boolean {
     const frame = params.frame
-    return frame !== null
-      && !frame.isDestroyed()
+    return frame !== null && this.isHarnessFrame(frame)
+  }
+
+  private isHarnessFrame(frame: WebFrameMain): boolean {
+    return !frame.isDestroyed()
       && frame.parent !== null
       && this.harnessOrigin !== undefined
-      && this.safeOrigin(params.frameURL) === this.harnessOrigin
+      && this.safeOrigin(frame.url) === this.harnessOrigin
+  }
+
+  private isShellFrame(frame: WebFrameMain): boolean {
+    const window = this.window
+    return window !== undefined
+      && !window.isDestroyed()
+      && !frame.isDestroyed()
+      && frame.parent === null
+  }
+
+  private isSupportedContextMenu(params: ContextMenuParams): boolean {
+    const frame = params.frame
+    return frame !== null && ((params.isEditable && this.isShellFrame(frame)) || this.isHarnessContextMenu(params))
   }
 
   private async openContextMenu(params: ContextMenuParams): Promise<void> {
     const frame = params.frame
-    if (frame === null || frame.isDestroyed() || !this.isHarnessContextMenu(params)) return
+    if (frame === null || !this.isSupportedContextMenu(params)) return
+    const harnessContext = this.isHarnessFrame(frame)
     const sequence = ++this.contextMenuSequence
     const previous = this.pendingContextMenu
     this.pendingContextMenu = undefined
     if (previous !== undefined) void this.releasePluginContextMenu(previous, false)
 
     const builtins = buildBuiltinContextMenuItems(params)
-    const pluginCollection = await this.collectPluginContextMenu(frame)
-    if (sequence !== this.contextMenuSequence || frame.isDestroyed() || this.safeOrigin(frame.url) !== this.harnessOrigin) {
+    const pluginCollection = harnessContext ? await this.collectPluginContextMenu(frame) : undefined
+    if (sequence !== this.contextMenuSequence || (!this.isShellFrame(frame) && !this.isHarnessFrame(frame))) {
       if (pluginCollection !== undefined) void this.releasePluginContextMenu({
         requestId: '',
         frame,
+        x: 0,
+        y: 0,
         linkURL: '',
         selectionText: '',
         allowedItemIds: new Set(),
@@ -340,6 +361,8 @@ export class WindowController {
     this.pendingContextMenu = {
       requestId,
       frame,
+      x: params.x,
+      y: params.y,
       linkURL: params.linkURL,
       selectionText: params.selectionText,
       allowedItemIds: new Set(items.flatMap((entry) => entry.kind === 'item' && entry.enabled ? [entry.id] : [])),
@@ -383,13 +406,38 @@ export class WindowController {
     }
   }
 
-  private async dismissContextMenu(requestId: string, restoreFocus: boolean): Promise<void> {
+  private async dismissContextMenu(requestId: string, restoreFocus: boolean, replayPointer?: unknown): Promise<void> {
     if (typeof requestId !== 'string' || requestId.length === 0 || requestId.length > 128) return
     const pending = this.pendingContextMenu
     if (pending === undefined || pending.requestId !== requestId) return
     this.pendingContextMenu = undefined
     if (restoreFocus) await this.focusContextMenuFrame(pending.frame)
     await this.releasePluginContextMenu(pending, restoreFocus)
+    const replay = this.parseContextMenuPointerReplay(replayPointer)
+    if (replay !== undefined) this.replayContextMenuPointer(replay)
+  }
+
+  private parseContextMenuPointerReplay(value: unknown): ContextMenuPointerReplay | undefined {
+    if (value === null || typeof value !== 'object') return undefined
+    const candidate = value as Partial<ContextMenuPointerReplay>
+    if (!Number.isFinite(candidate.x) || !Number.isFinite(candidate.y)) return undefined
+    if (candidate.button !== 'left' && candidate.button !== 'middle' && candidate.button !== 'right') return undefined
+    const x = Math.round(candidate.x as number)
+    const y = Math.round(candidate.y as number)
+    return x >= 0 && y >= 0 && x <= 100_000 && y <= 100_000
+      ? { x, y, button: candidate.button }
+      : undefined
+  }
+
+  private replayContextMenuPointer(replay: ContextMenuPointerReplay): void {
+    setTimeout(() => {
+      const window = this.window
+      if (window === undefined || window.isDestroyed()) return
+      const [width = 0, height = 0] = window.getContentSize()
+      if (replay.x >= width || replay.y >= height) return
+      window.webContents.sendInputEvent({ type: 'mouseDown', ...replay, clickCount: 1 })
+      window.webContents.sendInputEvent({ type: 'mouseUp', ...replay, clickCount: 1 })
+    }, 16)
   }
 
   private async executeBuiltinContextMenuAction(
@@ -402,6 +450,12 @@ export class WindowController {
     }
     if (action === 'copy-link') {
       if (/^https?:\/\//iu.test(pending.linkURL)) clipboard.writeText(pending.linkURL)
+      return
+    }
+    if (action === 'copy-image') {
+      await new Promise((resolve) => setTimeout(resolve, 16))
+      const contents = this.window?.webContents
+      if (contents !== undefined && !contents.isDestroyed()) contents.copyImageAt(pending.x, pending.y)
       return
     }
     if (pending.frame.isDestroyed()) return

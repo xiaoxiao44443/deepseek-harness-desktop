@@ -6,6 +6,7 @@ export type BuiltinContextMenuAction =
   | 'redo'
   | 'cut'
   | 'copy'
+  | 'copy-image'
   | 'paste'
   | 'select-all'
   | 'open-link'
@@ -16,6 +17,7 @@ export const BUILTIN_CONTEXT_MENU_ACTIONS: Readonly<Record<string, BuiltinContex
   'desktop.redo': 'redo',
   'desktop.cut': 'cut',
   'desktop.copy': 'copy',
+  'desktop.copy-image': 'copy-image',
   'desktop.paste': 'paste',
   'desktop.select-all': 'select-all',
   'desktop.open-link': 'open-link',
@@ -23,6 +25,7 @@ export const BUILTIN_CONTEXT_MENU_ACTIONS: Readonly<Record<string, BuiltinContex
 }
 
 type ContextMenuSnapshot = Pick<ContextMenuParams, 'isEditable' | 'selectionText' | 'linkURL' | 'editFlags'>
+  & Partial<Pick<ContextMenuParams, 'mediaType' | 'hasImageContents'>>
 
 function action(
   id: string,
@@ -47,6 +50,8 @@ function appendGroup(items: ContextMenuEntry[], group: ContextMenuActionEntry[],
 
 export function buildBuiltinContextMenuItems(snapshot: ContextMenuSnapshot): ContextMenuEntry[] {
   const items: ContextMenuEntry[] = []
+  const copyableImage = (snapshot.mediaType === 'image' && snapshot.hasImageContents === true)
+    || snapshot.mediaType === 'canvas'
   if (/^https?:\/\//iu.test(snapshot.linkURL)) {
     appendGroup(items, [
       action('desktop.open-link', '在浏览器中打开链接', 'external-link', true),
@@ -54,7 +59,13 @@ export function buildBuiltinContextMenuItems(snapshot: ContextMenuSnapshot): Con
     ], 'link')
   }
 
-  if (snapshot.isEditable) {
+  if (copyableImage) {
+    appendGroup(items, [
+      action('desktop.copy-image', '复制', 'copy', true),
+    ], 'image')
+  }
+
+  if (!copyableImage && snapshot.isEditable) {
     appendGroup(items, [
       action('desktop.undo', '撤销', 'undo', snapshot.editFlags.canUndo),
       action('desktop.redo', '重做', 'redo', snapshot.editFlags.canRedo),
@@ -64,15 +75,17 @@ export function buildBuiltinContextMenuItems(snapshot: ContextMenuSnapshot): Con
       action('desktop.copy', '复制', 'copy', snapshot.editFlags.canCopy),
       action('desktop.paste', '粘贴', 'paste', snapshot.editFlags.canPaste),
     ], 'edit')
-  } else if (snapshot.selectionText.length > 0) {
+  } else if (!copyableImage && snapshot.selectionText.length > 0) {
     appendGroup(items, [
       action('desktop.copy', '复制', 'copy', true),
     ], 'copy')
   }
 
-  appendGroup(items, [
-    action('desktop.select-all', '全选', 'select-all', snapshot.editFlags.canSelectAll),
-  ], 'selection')
+  if (!copyableImage) {
+    appendGroup(items, [
+      action('desktop.select-all', '全选', 'select-all', snapshot.editFlags.canSelectAll),
+    ], 'selection')
+  }
   return items
 }
 

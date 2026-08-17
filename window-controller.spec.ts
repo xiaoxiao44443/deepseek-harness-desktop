@@ -6,8 +6,16 @@ const electronMocks = vi.hoisted(() => ({
   ipcHandlers: new Map<string, (...args: unknown[]) => unknown>(),
   window: undefined as undefined | {
     webContents: EventEmitter & {
-      mainFrame: { framesInSubtree: unknown[] }
+      mainFrame: {
+        framesInSubtree: unknown[]
+        parent: null
+        url: string
+        isDestroyed: () => boolean
+        executeJavaScript: ReturnType<typeof vi.fn>
+      }
       send: ReturnType<typeof vi.fn>
+      sendInputEvent: ReturnType<typeof vi.fn>
+      copyImageAt: ReturnType<typeof vi.fn>
     }
   },
 }))
@@ -16,8 +24,16 @@ vi.mock('electron', async () => {
   const { EventEmitter: MockEventEmitter } = await import('node:events')
 
   class MockWebContents extends MockEventEmitter {
-    mainFrame = { framesInSubtree: [] }
+    mainFrame = {
+      framesInSubtree: [],
+      parent: null,
+      url: 'file:///desktop-shell/index.html',
+      isDestroyed: () => false,
+      executeJavaScript: vi.fn(async () => true),
+    }
     send = vi.fn()
+    sendInputEvent = vi.fn()
+    copyImageAt = vi.fn()
     undo = vi.fn()
     redo = vi.fn()
     cut = vi.fn()
@@ -47,6 +63,7 @@ vi.mock('electron', async () => {
     isDestroyed(): boolean { return false }
     isMinimized(): boolean { return false }
     isMaximized(): boolean { return false }
+    getContentSize(): [number, number] { return [1280, 720] }
   }
 
   return {
@@ -220,6 +237,157 @@ describe('WindowController Harness reload', () => {
       await select({ sender: window.webContents }, { requestId: request.requestId, itemId: 'desktop.copy' })
     }
     expect(electronMocks.clipboardWriteText).toHaveBeenCalledWith('selected text')
+
+    window?.webContents.emit('context-menu', { preventDefault: vi.fn() }, {
+      x: 96,
+      y: 128,
+      frame,
+      frameURL: url,
+      linkURL: '',
+      selectionText: '',
+      mediaType: 'image',
+      hasImageContents: true,
+      isEditable: false,
+      editFlags: {
+        canUndo: false,
+        canRedo: false,
+        canCut: false,
+        canCopy: false,
+        canPaste: false,
+        canDelete: false,
+        canSelectAll: true,
+        canEditRichly: false,
+      },
+    })
+    await vi.waitFor(() => {
+      expect(window?.webContents.send.mock.calls.filter(([channel]) => channel === 'desktop:context-menu')).toHaveLength(2)
+    })
+    const imageRequest = window?.webContents.send.mock.calls.filter(([channel]) => channel === 'desktop:context-menu').at(-1)?.[1]
+    expect(imageRequest).toMatchObject({
+      items: [expect.objectContaining({ id: 'desktop.copy-image', label: '复制', enabled: true })],
+    })
+    if (select !== undefined && window !== undefined && imageRequest !== undefined) {
+      await select({ sender: window.webContents }, { requestId: imageRequest.requestId, itemId: 'desktop.copy-image' })
+    }
+    expect(window?.webContents.copyImageAt).toHaveBeenCalledWith(96, 128)
+  })
+
+  it('opens the core context menu inside desktop shell inputs', async () => {
+    const runtime = Object.assign(new EventEmitter(), {
+      harnessHome: '/path/that/does/not/exist',
+      updateState: { status: 'idle' },
+      checkForUpdates: vi.fn(),
+    })
+    const development = Object.assign(new EventEmitter(), {
+      state: { pnpmVersion: '11.19.0', restarting: false, commandRunning: false },
+      choosePatch: vi.fn(),
+      clearPatch: vi.fn(),
+      restartHarness: vi.fn(),
+      runPlugin: vi.fn(),
+    })
+    const controller = new WindowController(runtime as never, development as never)
+    await controller.create()
+
+    const window = electronMocks.window
+    expect(window).toBeDefined()
+    if (window === undefined) return
+    const contextEvent = { preventDefault: vi.fn() }
+    window.webContents.emit('context-menu', contextEvent, {
+      x: 480,
+      y: 360,
+      frame: window.webContents.mainFrame,
+      frameURL: window.webContents.mainFrame.url,
+      linkURL: '',
+      selectionText: '',
+      isEditable: true,
+      editFlags: {
+        canUndo: false,
+        canRedo: false,
+        canCut: false,
+        canCopy: false,
+        canPaste: true,
+        canDelete: false,
+        canSelectAll: true,
+        canEditRichly: false,
+      },
+    })
+
+    await vi.waitFor(() => {
+      expect(window.webContents.send.mock.calls.some(([channel]) => channel === 'desktop:context-menu')).toBe(true)
+    })
+    expect(contextEvent.preventDefault).toHaveBeenCalledOnce()
+    const request = window.webContents.send.mock.calls.find(([channel]) => channel === 'desktop:context-menu')?.[1]
+    expect(request).toMatchObject({
+      x: 480,
+      y: 360,
+      items: expect.arrayContaining([
+        expect.objectContaining({ id: 'desktop.paste', enabled: true }),
+        expect.objectContaining({ id: 'desktop.select-all', enabled: true }),
+      ]),
+    })
+    expect(window.webContents.mainFrame.executeJavaScript).not.toHaveBeenCalledWith(
+      'window.dshDesktop?.contextMenu?.collect?.() ?? null',
+    )
+    const dismiss = electronMocks.ipcHandlers.get('desktop:context-menu-dismiss')
+    expect(dismiss).toBeDefined()
+    if (dismiss !== undefined && request !== undefined) {
+      await dismiss(
+        { sender: window.webContents },
+        request.requestId,
+        false,
+        { x: 240, y: 220, button: 'left' },
+      )
+    }
+    await vi.waitFor(() => expect(window.webContents.sendInputEvent).toHaveBeenCalledTimes(2))
+    expect(window.webContents.sendInputEvent.mock.calls).toEqual([
+      [{ type: 'mouseDown', x: 240, y: 220, button: 'left', clickCount: 1 }],
+      [{ type: 'mouseUp', x: 240, y: 220, button: 'left', clickCount: 1 }],
+    ])
+  })
+
+  it('ignores right clicks outside desktop shell inputs', async () => {
+    const runtime = Object.assign(new EventEmitter(), {
+      harnessHome: '/path/that/does/not/exist',
+      updateState: { status: 'idle' },
+      checkForUpdates: vi.fn(),
+    })
+    const development = Object.assign(new EventEmitter(), {
+      state: { pnpmVersion: '11.19.0', restarting: false, commandRunning: false },
+      choosePatch: vi.fn(),
+      clearPatch: vi.fn(),
+      restartHarness: vi.fn(),
+      runPlugin: vi.fn(),
+    })
+    const controller = new WindowController(runtime as never, development as never)
+    await controller.create()
+
+    const window = electronMocks.window
+    expect(window).toBeDefined()
+    if (window === undefined) return
+    const contextEvent = { preventDefault: vi.fn() }
+    window.webContents.emit('context-menu', contextEvent, {
+      x: 480,
+      y: 360,
+      frame: window.webContents.mainFrame,
+      frameURL: window.webContents.mainFrame.url,
+      linkURL: '',
+      selectionText: 'desktop shell text',
+      isEditable: false,
+      editFlags: {
+        canUndo: false,
+        canRedo: false,
+        canCut: false,
+        canCopy: true,
+        canPaste: false,
+        canDelete: false,
+        canSelectAll: true,
+        canEditRichly: false,
+      },
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(contextEvent.preventDefault).not.toHaveBeenCalled()
+    expect(window.webContents.send.mock.calls.some(([channel]) => channel === 'desktop:context-menu')).toBe(false)
   })
 
   it('detects a ready Harness frame even when renderer load events are missed', async () => {

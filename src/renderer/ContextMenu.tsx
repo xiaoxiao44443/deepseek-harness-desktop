@@ -19,10 +19,10 @@ import {
   Trash2,
 } from 'lucide-react'
 import { useLayoutEffect, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import { clampContextMenuPosition } from '../shared/context-menu.js'
-import type { ContextMenuIcon, DesktopContextMenuRequest } from '../shared/context-menu.js'
+import type { ContextMenuIcon, ContextMenuPointerReplay, DesktopContextMenuRequest } from '../shared/context-menu.js'
 
 const menuIcons: Record<ContextMenuIcon, LucideIcon> = {
   copy: Copy,
@@ -47,7 +47,7 @@ const menuIcons: Record<ContextMenuIcon, LucideIcon> = {
 interface ContextMenuProps {
   menu: DesktopContextMenuRequest
   onSelect: (itemId: string) => void
-  onDismiss: () => void
+  onDismiss: (replayPointer?: ContextMenuPointerReplay) => void
 }
 
 export function ContextMenu({ menu, onSelect, onDismiss }: ContextMenuProps): ReactNode {
@@ -72,6 +72,12 @@ export function ContextMenu({ menu, onSelect, onDismiss }: ContextMenuProps): Re
     return () => window.removeEventListener('resize', place)
   }, [menu.requestId, menu.x, menu.y])
 
+  const dismissThroughPointer = (event: ReactPointerEvent<HTMLButtonElement>): void => {
+    event.preventDefault()
+    const button = event.button === 2 ? 'right' : event.button === 1 ? 'middle' : 'left'
+    onDismiss({ x: event.clientX, y: event.clientY, button })
+  }
+
   return (
     <>
       <button
@@ -79,8 +85,8 @@ export function ContextMenu({ menu, onSelect, onDismiss }: ContextMenuProps): Re
         type="button"
         tabIndex={-1}
         aria-label="关闭右键菜单"
-        onPointerDown={(event) => { event.preventDefault(); onDismiss() }}
-        onContextMenu={(event) => { event.preventDefault(); onDismiss() }}
+        onPointerDown={dismissThroughPointer}
+        onContextMenu={(event) => event.preventDefault()}
       />
       <section
         ref={card}
