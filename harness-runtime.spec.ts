@@ -1,0 +1,140 @@
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { c as createTar } from 'tar'
+import { describe, expect, it } from 'vitest'
+import {
+  bundledArchiveProgress,
+  HarnessRuntimeManager,
+  RUNTIME_PREPARATION_PROGRESS_EVENT,
+} from './src/main/harness-runtime.js'
+
+async function writeRuntimeFixture(root: string, version: string): Promise<void> {
+  const dshRoot = join(root, 'node_modules', '@deepseek-ai', 'dsh')
+  await mkdir(join(dshRoot, 'lib'), { recursive: true })
+  await mkdir(join(root, 'node_modules', 'pnpm', 'bin'), { recursive: true })
+  await writeFile(join(dshRoot, 'package.json'), JSON.stringify({ version }))
+  await writeFile(join(dshRoot, 'lib', 'bin.js'), 'export {}\n')
+  await writeFile(join(root, 'node_modules', 'pnpm', 'bin', 'pnpm.cjs'), '#!/usr/bin/env node\n')
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
+describe('bundled Harness archive progress', () => {
+  it('reports compressed bytes while reserving 100% for validation and activation', () => {
+    expect(bundledArchiveProgress(0, 1_000)).toBe(0)
+    expect(bundledArchiveProgress(425, 1_000)).toBe(42)
+    expect(bundledArchiveProgress(1_000, 1_000)).toBe(99)
+    expect(bundledArchiveProgress(2_000, 1_000)).toBe(99)
+  })
+
+  it('handles invalid byte totals safely', () => {
+    expect(bundledArchiveProgress(100, 0)).toBe(0)
+    expect(bundledArchiveProgress(Number.NaN, 1_000)).toBe(0)
+  })
+
+  it('streams a bundled archive and emits progress through final activation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-runtime-progress-'))
+    try {
+      const source = join(root, 'source')
+      const dshRoot = join(source, 'node_modules', '@deepseek-ai', 'dsh')
+      await mkdir(join(dshRoot, 'lib'), { recursive: true })
+      await mkdir(join(source, 'node_modules', 'pnpm', 'bin'), { recursive: true })
+      await writeFile(join(dshRoot, 'package.json'), JSON.stringify({ version: '0.1.0' }))
+      await writeFile(join(dshRoot, 'lib', 'bin.js'), 'export {}\n')
+      await writeFile(join(source, 'node_modules', 'pnpm', 'bin', 'pnpm.cjs'), '#!/usr/bin/env node\n')
+
+      const archivePath = join(root, 'runtime.tgz')
+      await createTar({ cwd: source, file: archivePath, gzip: true }, ['.'])
+      const bundledRoot = join(root, 'bundled')
+      const manager = new HarnessRuntimeManager(
+        join(root, 'user-data'),
+        process.execPath,
+        bundledRoot,
+        archivePath,
+      )
+      const progress: number[] = []
+      manager.on(RUNTIME_PREPARATION_PROGRESS_EVENT, (value: number) => progress.push(value))
+
+      await manager.initialize()
+
+      expect(progress[0]).toBe(0)
+      expect(progress).toContain(99)
+      expect(progress.at(-1)).toBe(100)
+      await expect(access(join(bundledRoot, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')))
+        .resolves.toBeUndefined()
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('Harness runtime storage cleanup', () => {
+  it('keeps the current bundle and referenced updates while removing duplicates, stale bundles, and npm cache', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-runtime-cleanup-'))
+    try {
+      const userData = join(root, 'user-data')
+      const runtimeRoot = join(userData, 'harness-runtime')
+      const bundledRoot = join(runtimeRoot, 'bundled')
+      const currentBundle = join(bundledRoot, 'desktop-0.1.0-rc.7')
+      const oldBundle = join(bundledRoot, 'desktop-0.1.0')
+      const versionsRoot = join(runtimeRoot, 'versions')
+      const duplicateVersion = join(versionsRoot, '0.1.0-rc.7')
+      const pendingVersion = join(versionsRoot, '0.2.0')
+      const orphanedVersion = join(versionsRoot, '0.3.0')
+      const npmCache = join(runtimeRoot, 'npm-cache')
+      const stagingRoot = join(runtimeRoot, 'staging')
+
+      await Promise.all([
+        writeRuntimeFixture(currentBundle, '0.1.0-rc.7'),
+        writeRuntimeFixture(oldBundle, '0.1.0-rc.6'),
+        writeRuntimeFixture(duplicateVersion, '0.1.0-rc.7'),
+        writeRuntimeFixture(pendingVersion, '0.2.0'),
+        writeRuntimeFixture(orphanedVersion, '0.3.0'),
+        mkdir(join(npmCache, '_cacache'), { recursive: true }),
+        mkdir(join(stagingRoot, 'abandoned-install'), { recursive: true }),
+      ])
+      await writeFile(join(npmCache, '_cacache', 'content'), 'cached package')
+      await writeFile(join(stagingRoot, 'abandoned-install', 'package.json'), '{}')
+      await writeFile(join(runtimeRoot, 'state.json'), `${JSON.stringify({
+        schemaVersion: 1,
+        activeVersion: '0.1.0-rc.7',
+        pendingVersion: '0.2.0',
+        badVersions: {
+          '0.1.0-rc.6': { failedAt: '2026-08-01T00:00:00.000Z', reason: 'old failure' },
+          '0.4.0': { failedAt: '2026-08-02T00:00:00.000Z', reason: 'future failure' },
+        },
+      }, null, 2)}\n`)
+
+      const manager = new HarnessRuntimeManager(userData, process.execPath, currentBundle)
+      await manager.initialize()
+
+      expect(await pathExists(currentBundle)).toBe(true)
+      expect(await pathExists(oldBundle)).toBe(false)
+      expect(await pathExists(duplicateVersion)).toBe(false)
+      expect(await pathExists(pendingVersion)).toBe(true)
+      expect(await pathExists(orphanedVersion)).toBe(false)
+      expect(await pathExists(npmCache)).toBe(false)
+      expect(await pathExists(stagingRoot)).toBe(false)
+
+      const state = JSON.parse(await readFile(join(runtimeRoot, 'state.json'), 'utf8')) as {
+        activeVersion?: string
+        pendingVersion?: string
+        badVersions: Record<string, unknown>
+      }
+      expect(state.activeVersion).toBeUndefined()
+      expect(state.pendingVersion).toBe('0.2.0')
+      expect(state.badVersions['0.1.0-rc.6']).toBeUndefined()
+      expect(state.badVersions['0.4.0']).toBeDefined()
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})

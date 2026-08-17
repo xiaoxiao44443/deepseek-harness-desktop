@@ -6,7 +6,7 @@ import type { ContextMenuParams, WebFrameMain } from 'electron'
 import type { ColorTheme, DesktopPlatform, DesktopState, DevelopmentPluginRequest, HarnessLifecycle, PluginInitializationFailure, TitleMenuAction, WindowAction } from '../shared/contracts.js'
 import type { DesktopContextMenuActionRequest, DesktopContextMenuRequest, DesktopPointerInput, PluginContextMenuCollection } from '../shared/context-menu.js'
 import { DESKTOP_CONTEXT_MENU_TRANSPORT_KEY, parsePluginContextMenuCollection } from '../shared/context-menu.js'
-import type { HarnessRuntimeManager } from './harness-runtime.js'
+import { RUNTIME_PREPARATION_PROGRESS_EVENT, type HarnessRuntimeManager } from './harness-runtime.js'
 import type { DevelopmentService } from './development-service.js'
 import { parsePluginInitializationFailure, type PluginRecoveryService } from './plugin-recovery.js'
 import { appendPluginContextMenuItems, BUILTIN_CONTEXT_MENU_ACTIONS, buildBuiltinContextMenuItems } from './context-menu.js'
@@ -43,6 +43,7 @@ export class WindowController {
   private window: BrowserWindow | undefined
   private harnessLifecycle: HarnessLifecycle = 'stopped'
   private harnessMessage: string | undefined
+  private runtimePreparationProgress: number | undefined
   private pluginFailure: PluginInitializationFailure | undefined
   private harnessVersion: string | undefined
   private harnessUrl: string | undefined
@@ -66,6 +67,16 @@ export class WindowController {
     private readonly pluginRecovery?: PluginRecoveryService,
   ) {
     this.runtime.on('update-state', () => this.publishState())
+    this.runtime.on(RUNTIME_PREPARATION_PROGRESS_EVENT, (progress: unknown) => {
+      if (
+        this.harnessLifecycle !== 'starting'
+        || this.harnessVersion !== undefined
+        || typeof progress !== 'number'
+        || !Number.isFinite(progress)
+      ) return
+      this.runtimePreparationProgress = Math.min(100, Math.max(0, Math.round(progress)))
+      this.publishState()
+    })
     this.development.on('state', () => this.publishState())
   }
 
@@ -198,6 +209,7 @@ export class WindowController {
     this.harnessOrigin = undefined
     this.harnessLifecycle = 'starting'
     this.pluginFailure = undefined
+    this.runtimePreparationProgress = undefined
     this.harnessMessage = app.isPackaged && process.platform === 'win32'
       ? '首次启动正在解压 Harness 运行时，请稍候…'
       : '正在准备本地 Harness 运行时…'
@@ -214,6 +226,7 @@ export class WindowController {
     this.harnessOrigin = undefined
     this.harnessLifecycle = 'starting'
     this.pluginFailure = undefined
+    this.runtimePreparationProgress = undefined
     this.harnessMessage = '正在启动 Harness…'
     this.publishState()
   }
@@ -227,6 +240,7 @@ export class WindowController {
     this.harnessOrigin = new URL(url).origin
     this.harnessLifecycle = 'starting'
     this.pluginFailure = undefined
+    this.runtimePreparationProgress = undefined
     this.harnessMessage = '正在加载 Harness 界面…'
 
     const loadPromise = new Promise<void>((resolve, reject) => {
@@ -253,6 +267,7 @@ export class WindowController {
     this.cancelPendingHarnessLoad(new Error(message))
     this.harnessLifecycle = 'error'
     this.harnessMessage = message
+    this.runtimePreparationProgress = undefined
     this.pluginFailure = pluginFailure
     this.harnessUrl = undefined
     this.harnessOrigin = undefined
@@ -523,6 +538,7 @@ export class WindowController {
     this.stopHarnessLoadProbe()
     this.harnessLifecycle = 'ready'
     this.harnessMessage = undefined
+    this.runtimePreparationProgress = undefined
     this.pluginFailure = undefined
     this.startThemeSync()
     this.startPluginFailureProbe()
@@ -556,6 +572,9 @@ export class WindowController {
       harnessLoadId: this.harnessLoadId,
       harnessLifecycle: this.harnessLifecycle,
       ...(this.harnessMessage !== undefined ? { harnessMessage: this.harnessMessage } : {}),
+      ...(this.runtimePreparationProgress !== undefined
+        ? { runtimePreparationProgress: this.runtimePreparationProgress }
+        : {}),
       ...(this.pluginFailure !== undefined ? { pluginFailure: { ...this.pluginFailure } } : {}),
       disabledPlugins: this.pluginRecovery?.disabledPlugins ?? [],
       updateStatus: update.status,

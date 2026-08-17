@@ -415,6 +415,7 @@ window.__ModuleLoader__.load({
 
 		function CompletionMenu({ value, disabled, onChange }) {
 			const [open, setOpen] = React.useState(false);
+			const [hovered, setHovered] = React.useState(false);
 			const labels = {
 				never: "从不",
 				unfocused: "仅当应用失焦时",
@@ -427,7 +428,15 @@ window.__ModuleLoader__.load({
 				"aria-expanded": open,
 				disabled,
 				onClick: () => setOpen((current) => !current),
-				style: { ...styles.menuTrigger, opacity: disabled ? 0.6 : 1 }
+				onPointerEnter: () => setHovered(true),
+				onPointerLeave: () => setHovered(false),
+				style: {
+					...styles.menuTrigger,
+					background: !disabled && (hovered || open)
+						? "var(--dsw-alias-interactive-bg-hover)"
+						: "var(--dsw-alias-bg-module-platform)",
+					opacity: disabled ? 0.6 : 1
+				}
 			},
 				React.createElement("span", null, labels[value]),
 				React.createElement(Primitives.IconChevronDownOutline14, { size: 14 })

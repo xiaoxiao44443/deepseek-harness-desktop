@@ -41,6 +41,7 @@ export interface DesktopState {
   harnessLoadId: number
   harnessLifecycle: HarnessLifecycle
   harnessMessage?: string
+  runtimePreparationProgress?: number
   pluginFailure?: PluginInitializationFailure
   disabledPlugins: PluginRecoveryEntry[]
   updateStatus: HarnessUpdateStatus

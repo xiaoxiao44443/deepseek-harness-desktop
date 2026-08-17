@@ -83,9 +83,39 @@ vi.mock('electron', async () => {
 })
 
 import { WindowController } from './src/main/window-controller.js'
+import { RUNTIME_PREPARATION_PROGRESS_EVENT } from './src/main/harness-runtime.js'
 import { DESKTOP_CONTEXT_MENU_TRANSPORT_KEY } from './src/shared/context-menu.js'
 
 describe('WindowController Harness reload', () => {
+  it('publishes bundled runtime extraction progress only during preparation', async () => {
+    const runtime = Object.assign(new EventEmitter(), {
+      harnessHome: '/path/that/does/not/exist',
+      updateState: { status: 'idle' },
+      checkForUpdates: vi.fn(),
+    })
+    const development = Object.assign(new EventEmitter(), {
+      state: { pnpmVersion: '11.19.0', restarting: false, commandRunning: false },
+      choosePatch: vi.fn(),
+      clearPatch: vi.fn(),
+      restartHarness: vi.fn(),
+      runPlugin: vi.fn(),
+    })
+    const controller = new WindowController(runtime as never, development as never)
+    controller.setRuntimePreparing()
+    await controller.create()
+
+    runtime.emit(RUNTIME_PREPARATION_PROGRESS_EVENT, 42)
+    expect(electronMocks.window?.webContents.send.mock.calls.at(-1)?.[1]).toMatchObject({
+      harnessLifecycle: 'starting',
+      runtimePreparationProgress: 42,
+    })
+
+    controller.setHarnessStarting('0.1.0')
+    expect(electronMocks.window?.webContents.send.mock.calls.at(-1)?.[1]).not.toHaveProperty(
+      'runtimePreparationProgress',
+    )
+  })
+
   it('accepts main-process frame navigation and remounts a reused URL', async () => {
     const runtime = Object.assign(new EventEmitter(), {
       harnessHome: '/path/that/does/not/exist',

@@ -260,6 +260,7 @@ export function App(): ReactNode {
   const update = useMemo(() => state === undefined ? undefined : updatePresentation(state), [state])
   const ready = state?.harnessLifecycle === 'ready'
   const preparingRuntime = state?.harnessLifecycle === 'starting' && state.harnessVersion === undefined
+  const runtimePreparationProgress = preparingRuntime ? state?.runtimePreparationProgress : undefined
   const harnessUrl = state?.harnessUrl ?? ''
   const availableUpdate = state?.updateVersion !== undefined && state.updateVersion !== state.harnessVersion
   const patchEnabled = Boolean(state?.development.patchPath)
@@ -314,7 +315,19 @@ export function App(): ReactNode {
         {harnessUrl ? <iframe key={state?.harnessLoadId} ref={harnessFrame} id="harness-frame" name="harness-frame" className="harness-frame" title="DeepSeek Harness" allow="clipboard-read; clipboard-write" src={harnessUrl} onLoad={() => void desktopApi.reportHarnessFrameLoaded(harnessUrl)} /> : null}
         {!ready ? (
           <section className={`startup ${state?.harnessLifecycle === 'error' ? 'error' : ''}`}>
-            <div className="loader" aria-hidden="true" />
+            {runtimePreparationProgress !== undefined ? (
+              <div
+                className="startup-progress"
+                role="progressbar"
+                aria-label="Harness 运行时解压进度"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={runtimePreparationProgress}
+              >
+                <span className="startup-progress-value">{runtimePreparationProgress}</span>
+                <span className="startup-progress-unit">%</span>
+              </div>
+            ) : <div className="loader" aria-hidden="true" />}
             <h1 id="startup-title">{pluginFailure ? 'Harness 插件初始化失败' : state?.harnessLifecycle === 'error' ? 'DeepSeek Harness 启动失败' : preparingRuntime ? '正在准备 DeepSeek Harness' : '正在启动 DeepSeek Harness'}</h1>
             <p id="startup-message">{state?.harnessMessage ?? '正在准备本地 Harness 服务…'}</p>
             {pluginFailure ? (

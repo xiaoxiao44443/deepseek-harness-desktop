@@ -220,6 +220,35 @@ body.maximized .restore-icon { display: block; }
   animation: spin 0.8s linear infinite;
 }
 
+.startup-progress {
+  display: inline-flex;
+  min-width: 92px;
+  align-items: baseline;
+  justify-content: center;
+  margin-bottom: 6px;
+  color: var(--accent);
+  font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+  line-height: 1;
+  text-shadow: 0 8px 28px color-mix(in srgb, var(--accent) 20%, transparent);
+  user-select: none;
+}
+
+.startup-progress-value {
+  font-size: 38px;
+  font-weight: 650;
+  letter-spacing: -0.045em;
+}
+
+.startup-progress-unit {
+  margin-left: 4px;
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  opacity: 0.72;
+}
+
 .startup h1 {
   margin: 0;
   font-size: 17px;

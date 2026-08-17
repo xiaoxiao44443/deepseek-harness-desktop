@@ -1,9 +1,11 @@
 import { EventEmitter } from 'node:events'
+import { createReadStream } from 'node:fs'
 import { homedir } from 'node:os'
-import { access, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { spawn } from 'node:child_process'
+import { pipeline } from 'node:stream/promises'
 import semver from 'semver'
 import { x as extractTar } from 'tar'
 import type { HarnessUpdateStatus } from '../shared/contracts.js'
@@ -16,6 +18,7 @@ export const DESKTOP_PNPM_VERSION = '11.19.0'
 const BUNDLED_RUNTIME_POLICY_VERSION = 3
 const REGISTRY_METADATA = 'https://registry.npmjs.org/@deepseek-ai%2Fdsh'
 const UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000
+export const RUNTIME_PREPARATION_PROGRESS_EVENT = 'prepare-progress'
 const INSTALL_SCRIPT_POLICY = {
   '@deepseek-ai/dsh-subprocess-local': true,
   '@google/genai': true,
@@ -41,7 +44,14 @@ interface RegistryMetadata {
   'dist-tags'?: Record<string, string>
 }
 
+export function bundledArchiveProgress(bytesRead: number, totalBytes: number): number {
+  if (!Number.isFinite(bytesRead) || !Number.isFinite(totalBytes) || totalBytes <= 0) return 0
+  return Math.min(99, Math.max(0, Math.floor((bytesRead / totalBytes) * 100)))
+}
+
 export class HarnessRuntimeManager extends EventEmitter {
+  private readonly runtimeRoot: string
+  private readonly bundledVersionsRoot: string
   private readonly versionsRoot: string
   private readonly stagingRoot: string
   private readonly statePath: string
@@ -60,22 +70,23 @@ export class HarnessRuntimeManager extends EventEmitter {
     private readonly packagedNpmCli?: string,
   ) {
     super()
-    const runtimeRoot = join(userDataPath, 'harness-runtime')
-    this.versionsRoot = join(runtimeRoot, 'versions')
-    this.stagingRoot = join(runtimeRoot, 'staging')
-    this.statePath = join(runtimeRoot, 'state.json')
-    this.npmCache = join(runtimeRoot, 'npm-cache')
+    this.runtimeRoot = join(userDataPath, 'harness-runtime')
+    this.bundledVersionsRoot = join(this.runtimeRoot, 'bundled')
+    this.versionsRoot = join(this.runtimeRoot, 'versions')
+    this.stagingRoot = join(this.runtimeRoot, 'staging')
+    this.statePath = join(this.runtimeRoot, 'state.json')
+    this.npmCache = join(this.runtimeRoot, 'npm-cache')
   }
 
   async initialize(): Promise<void> {
     await Promise.all([
       mkdir(this.versionsRoot, { recursive: true }),
       mkdir(this.stagingRoot, { recursive: true }),
-      mkdir(this.npmCache, { recursive: true }),
     ])
     this.state = await readRuntimeState(this.statePath)
     await this.ensureBundledRuntimeExtracted()
     this.bundled = await this.resolveBundledRuntime()
+    await this.cleanupRuntimeStorage()
   }
 
   get harnessHome(): string {
@@ -208,6 +219,7 @@ export class HarnessRuntimeManager extends EventEmitter {
     const stagingPath = join(this.stagingRoot, `${version}-${Date.now()}-${process.pid}`)
     await mkdir(stagingPath, { recursive: true })
     try {
+      await this.resetNpmCache()
       await writeFile(join(stagingPath, 'package.json'), `${JSON.stringify({
         name: 'deepseek-harness-managed-runtime',
         private: true,
@@ -228,6 +240,8 @@ export class HarnessRuntimeManager extends EventEmitter {
     } catch (error) {
       await rm(stagingPath, { recursive: true, force: true })
       throw error
+    } finally {
+      await this.removePath(this.npmCache)
     }
   }
 
@@ -285,17 +299,29 @@ export class HarnessRuntimeManager extends EventEmitter {
     await rm(stagingPath, { recursive: true, force: true })
     await mkdir(stagingPath, { recursive: true })
     try {
-      await extractTar({
+      const archiveSize = (await stat(this.bundledArchivePath)).size
+      let bytesRead = 0
+      let lastProgress = 0
+      this.emit(RUNTIME_PREPARATION_PROGRESS_EVENT, lastProgress)
+      const archive = createReadStream(this.bundledArchivePath)
+      archive.on('data', (chunk: string | Buffer) => {
+        bytesRead += typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.length
+        const progress = bundledArchiveProgress(bytesRead, archiveSize)
+        if (progress === lastProgress) return
+        lastProgress = progress
+        this.emit(RUNTIME_PREPARATION_PROGRESS_EVENT, progress)
+      })
+      await pipeline(archive, extractTar({
         cwd: stagingPath,
-        file: this.bundledArchivePath,
         preservePaths: false,
         strict: true,
-      })
+      }))
       await access(join(stagingPath, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'))
       await access(join(stagingPath, 'node_modules', 'pnpm', 'bin', 'pnpm.cjs'))
       await rm(this.bundledRuntimeRoot, { recursive: true, force: true })
       await mkdir(dirname(this.bundledRuntimeRoot), { recursive: true })
       await rename(stagingPath, this.bundledRuntimeRoot)
+      this.emit(RUNTIME_PREPARATION_PROGRESS_EVENT, 100)
     } catch (error) {
       await rm(stagingPath, { recursive: true, force: true })
       throw error
@@ -327,6 +353,78 @@ export class HarnessRuntimeManager extends EventEmitter {
     try { await access(candidate.entryPath); return true } catch { return false }
   }
 
+  private async cleanupRuntimeStorage(): Promise<void> {
+    const state = this.mustState()
+    const bundled = this.mustBundled()
+    const managedVersionsToKeep = new Set<string>()
+    let stateChanged = false
+
+    for (const key of ['activeVersion', 'pendingVersion'] as const) {
+      const version = state[key]
+      if (version === undefined) continue
+      const usableManagedRuntime = semver.valid(version) !== null
+        && semver.gt(version, bundled.version)
+        && state.badVersions[version] === undefined
+        && await this.isCandidatePresent(this.managedCandidate(version, key === 'pendingVersion'))
+      if (usableManagedRuntime) {
+        managedVersionsToKeep.add(version)
+      } else {
+        delete state[key]
+        stateChanged = true
+      }
+    }
+
+    for (const version of Object.keys(state.badVersions)) {
+      if (semver.valid(version) !== null && semver.lte(version, bundled.version)) {
+        delete state.badVersions[version]
+        stateChanged = true
+      }
+    }
+
+    if (stateChanged) await this.persistState()
+
+    await Promise.all([
+      this.removeObsoleteBundledRuntimes(),
+      this.removeObsoleteManagedRuntimes(managedVersionsToKeep),
+      this.removePath(this.stagingRoot),
+      this.removePath(this.npmCache),
+    ])
+  }
+
+  private async removeObsoleteBundledRuntimes(): Promise<void> {
+    if (this.bundledRuntimeRoot === undefined) return
+    const entries = await readdir(this.bundledVersionsRoot, { withFileTypes: true }).catch(() => [])
+    const bundledRuntimeRoot = resolve(this.bundledRuntimeRoot)
+    const bundledRuntimeIsManagedHere = pathsEqual(dirname(bundledRuntimeRoot), this.bundledVersionsRoot)
+    await Promise.all(entries.map(async (entry) => {
+      const entryPath = join(this.bundledVersionsRoot, entry.name)
+      if (bundledRuntimeIsManagedHere && pathsEqual(entryPath, bundledRuntimeRoot)) return
+      await this.removePath(entryPath)
+    }))
+  }
+
+  private async removeObsoleteManagedRuntimes(versionsToKeep: ReadonlySet<string>): Promise<void> {
+    const entries = await readdir(this.versionsRoot, { withFileTypes: true }).catch(() => [])
+    await Promise.all(entries.map(async (entry) => {
+      if (versionsToKeep.has(entry.name)) return
+      await this.removePath(join(this.versionsRoot, entry.name))
+    }))
+  }
+
+  private async resetNpmCache(): Promise<void> {
+    await this.removePath(this.npmCache)
+    await mkdir(this.npmCache, { recursive: true })
+  }
+
+  private async removePath(path: string): Promise<void> {
+    try {
+      await rm(path, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
+    } catch {
+      // Runtime cleanup is best effort. A locked cache or stale version must not
+      // prevent the known-good bundled Harness from starting.
+    }
+  }
+
   private mustState(): HarnessRuntimeState {
     if (this.state === undefined) throw new Error('HarnessRuntimeManager has not been initialized')
     return this.state
@@ -345,4 +443,12 @@ export class HarnessRuntimeManager extends EventEmitter {
     this.updateView = view
     this.emit('update-state', this.updateState)
   }
+}
+
+function pathsEqual(left: string, right: string): boolean {
+  const normalizedLeft = resolve(left)
+  const normalizedRight = resolve(right)
+  return process.platform === 'win32'
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight
 }
