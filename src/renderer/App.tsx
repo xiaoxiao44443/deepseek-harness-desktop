@@ -1,6 +1,6 @@
 import { ChevronDown, Code2, Copy, Minus, Square, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react'
 import type { DesktopState, DevelopmentState, PluginRecoveryEntry, TitleMenuAction } from '../shared/contracts.js'
 import type { ContextMenuPointerReplay, DesktopContextMenuRequest } from '../shared/context-menu.js'
 import { ContextMenu } from './ContextMenu.js'
@@ -239,7 +239,12 @@ export function App(): ReactNode {
   const focusHarness = useCallback(() => {
     if (state?.harnessUrl) harnessFrame.current?.focus({ preventScroll: true })
   }, [state?.harnessUrl])
-  const closeMenu = useCallback(() => { setMenuOpen(false); requestAnimationFrame(focusHarness) }, [focusHarness])
+  const dismissMenuThroughPointer = useCallback((event: ReactPointerEvent<HTMLButtonElement>): void => {
+    event.preventDefault()
+    const button = event.button === 2 ? 'right' : event.button === 1 ? 'middle' : 'left'
+    setMenuOpen(false)
+    void desktopApi.replayPointerInput({ x: event.clientX, y: event.clientY, button })
+  }, [])
   const runMenuAction = useCallback(async (action: TitleMenuAction) => {
     setMenuOpen(false)
     await desktopApi.titleMenuAction(action)
@@ -333,7 +338,7 @@ export function App(): ReactNode {
         </div>
       </header>
 
-      {menuOpen ? <button className="menu-backdrop" type="button" tabIndex={-1} aria-label="关闭应用菜单" onPointerDown={closeMenu} /> : null}
+      {menuOpen ? <button className="menu-backdrop" type="button" tabIndex={-1} aria-label="关闭应用菜单" onPointerDown={dismissMenuThroughPointer} /> : null}
       {menuOpen && state !== undefined && update !== undefined ? (
         <section id="title-menu-popover" className="menu-card" role="menu" aria-label="DeepSeek Harness 应用菜单">
           <div className="menu-list">

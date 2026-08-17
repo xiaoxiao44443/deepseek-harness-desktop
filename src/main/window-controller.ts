@@ -303,6 +303,11 @@ export class WindowController {
       if (event.sender !== this.window?.webContents) return
       await this.dismissContextMenu(requestId, restoreFocus !== false, replayPointer)
     })
+    ipcMain.handle('desktop:replay-pointer-input', (event, replayPointer: unknown) => {
+      if (event.sender !== this.window?.webContents) return
+      const replay = this.parseContextMenuPointerReplay(replayPointer)
+      if (replay !== undefined) this.replayPointerInput(replay)
+    })
   }
 
   private isHarnessContextMenu(params: ContextMenuParams): boolean {
@@ -414,7 +419,7 @@ export class WindowController {
     if (restoreFocus) await this.focusContextMenuFrame(pending.frame)
     await this.releasePluginContextMenu(pending, restoreFocus)
     const replay = this.parseContextMenuPointerReplay(replayPointer)
-    if (replay !== undefined) this.replayContextMenuPointer(replay)
+    if (replay !== undefined) this.replayPointerInput(replay)
   }
 
   private parseContextMenuPointerReplay(value: unknown): ContextMenuPointerReplay | undefined {
@@ -429,7 +434,7 @@ export class WindowController {
       : undefined
   }
 
-  private replayContextMenuPointer(replay: ContextMenuPointerReplay): void {
+  private replayPointerInput(replay: ContextMenuPointerReplay): void {
     setTimeout(() => {
       const window = this.window
       if (window === undefined || window.isDestroyed()) return

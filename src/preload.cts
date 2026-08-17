@@ -17,6 +17,7 @@ const bridge: DesktopBridge = {
   runDevelopmentPlugin: (request: DevelopmentPluginRequest) => ipcRenderer.invoke('desktop:development-run-plugin', request) as Promise<void>,
   selectContextMenuItem: (request: DesktopContextMenuActionRequest) => ipcRenderer.invoke('desktop:context-menu-select', request) as Promise<void>,
   dismissContextMenu: (requestId: string, restoreFocus = true, replayPointer?: ContextMenuPointerReplay) => ipcRenderer.invoke('desktop:context-menu-dismiss', requestId, restoreFocus, replayPointer) as Promise<void>,
+  replayPointerInput: (replayPointer: ContextMenuPointerReplay) => ipcRenderer.invoke('desktop:replay-pointer-input', replayPointer) as Promise<void>,
   onState(listener: (state: DesktopState) => void) {
     const handler = (_event: Electron.IpcRendererEvent, state: DesktopState): void => listener(state)
     ipcRenderer.on('desktop:state', handler)

@@ -343,6 +343,18 @@ describe('WindowController Harness reload', () => {
       [{ type: 'mouseDown', x: 240, y: 220, button: 'left', clickCount: 1 }],
       [{ type: 'mouseUp', x: 240, y: 220, button: 'left', clickCount: 1 }],
     ])
+
+    window.webContents.sendInputEvent.mockClear()
+    const replayPointer = electronMocks.ipcHandlers.get('desktop:replay-pointer-input')
+    expect(replayPointer).toBeDefined()
+    if (replayPointer !== undefined) {
+      await replayPointer({ sender: window.webContents }, { x: 360, y: 260, button: 'left' })
+    }
+    await vi.waitFor(() => expect(window.webContents.sendInputEvent).toHaveBeenCalledTimes(2))
+    expect(window.webContents.sendInputEvent.mock.calls).toEqual([
+      [{ type: 'mouseDown', x: 360, y: 260, button: 'left', clickCount: 1 }],
+      [{ type: 'mouseUp', x: 360, y: 260, button: 'left', clickCount: 1 }],
+    ])
   })
 
   it('ignores right clicks outside desktop shell inputs', async () => {
