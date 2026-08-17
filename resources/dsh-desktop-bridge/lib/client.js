@@ -4,6 +4,7 @@ window.__ModuleLoader__.load({
 		var module = { exports: {} };
 		var exports = module.exports;
 		Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
+		const Cordis = require("@deepseek-ai/cordis");
 		const React = require("react");
 		const Primitives = require("@deepseek-ai/dsh-client-ui-primitives");
 
@@ -18,10 +19,12 @@ window.__ModuleLoader__.load({
 			"copy", "cut", "paste", "undo", "redo", "select-all", "external-link", "link", "plugin",
 			"archive", "trash", "edit", "folder", "settings", "terminal", "sparkles", "refresh"
 		]);
-		const contextMenuContributions = new Map();
-		const contextMenuInvocations = new Map();
-		let capturedContextMenu;
-		let contextMenuToken = 0;
+		const CONTEXT_MENU_TRANSPORT_SYMBOL = Symbol.for("dsh.desktop.context-menu.transport.v1");
+		const captureContextMenuSymbol = Symbol("desktopContextMenu.capture");
+		const collectContextMenuSymbol = Symbol("desktopContextMenu.collect");
+		const executeContextMenuSymbol = Symbol("desktopContextMenu.execute");
+		const dismissContextMenuSymbol = Symbol("desktopContextMenu.dismiss");
+		const clearContextMenuSymbol = Symbol("desktopContextMenu.clear");
 
 		function boundedMenuText(value, maxLength) {
 			if (typeof value !== "string") return undefined;
@@ -97,53 +100,6 @@ window.__ModuleLoader__.load({
 			}
 		}
 
-		function collectContextMenuContributions() {
-			const context = capturedContextMenu;
-			capturedContextMenu = undefined;
-			if (context === undefined || performance.now() - context.capturedAt > 1_500) return null;
-
-			const evaluated = [];
-			for (const contribution of contextMenuContributions.values()) {
-				if (resolveContributionValue(contribution.when, context, true) !== true) continue;
-				const label = boundedMenuText(resolveContributionValue(contribution.label, context, ""), 120);
-				if (label === undefined) continue;
-				evaluated.push({
-					contribution,
-					group: contribution.group,
-					order: contribution.order,
-					item: {
-						kind: "item",
-						id: contribution.id,
-						label,
-						enabled: resolveContributionValue(contribution.enabled, context, true) !== false,
-						icon: contribution.icon,
-						...(contribution.checked === undefined ? {} : { checked: resolveContributionValue(contribution.checked, context, false) === true }),
-						...(contribution.danger === undefined ? {} : { danger: resolveContributionValue(contribution.danger, context, false) === true })
-					}
-				});
-			}
-			if (evaluated.length === 0) return null;
-			evaluated.sort((left, right) => left.group.localeCompare(right.group) || left.order - right.order || left.item.id.localeCompare(right.item.id));
-
-			const items = [];
-			const actions = new Map();
-			let lastGroup;
-			let separator = 0;
-			for (const entry of evaluated) {
-				if (lastGroup !== undefined && lastGroup !== entry.group) {
-					items.push({ kind: "separator", id: `plugin.separator.${separator++}` });
-				}
-				items.push(entry.item);
-				actions.set(entry.item.id, entry.contribution.onSelect);
-				lastGroup = entry.group;
-			}
-
-			const token = `plugin-menu-${Date.now().toString(36)}-${(++contextMenuToken).toString(36)}`;
-			contextMenuInvocations.set(token, { context, actions });
-			while (contextMenuInvocations.size > 8) contextMenuInvocations.delete(contextMenuInvocations.keys().next().value);
-			return { token, items };
-		}
-
 		function focusContextMenuTarget(context) {
 			const target = context.editableElement ?? context.target.closest("button, a[href], input, textarea, [tabindex], [contenteditable]");
 			if (target instanceof HTMLElement) {
@@ -151,46 +107,164 @@ window.__ModuleLoader__.load({
 			}
 		}
 
-		function executeContextMenuContribution(token, itemId) {
-			const invocation = contextMenuInvocations.get(token);
-			contextMenuInvocations.delete(token);
-			if (invocation === undefined) return false;
-			const action = invocation.actions.get(itemId);
-			if (typeof action !== "function") return false;
-			focusContextMenuTarget(invocation.context);
-			void Promise.resolve().then(() => action(invocation.context)).catch((error) => {
-				console.warn(`[desktop-context-menu] ${itemId} failed`, error);
-			});
-			return true;
-		}
+		class DesktopContextMenuService extends Cordis.Service {
+			constructor(ctx) {
+				super(ctx, "desktopContextMenu");
+				this.version = 1;
+				this.icons = Object.freeze([...CONTEXT_MENU_ICONS]);
+				this._state = {
+					contributions: new Map(),
+					invocations: new Map(),
+					captured: undefined,
+					token: 0
+				};
+			}
 
-		function dismissContextMenuContribution(token, restoreFocus = true) {
-			const invocation = contextMenuInvocations.get(token);
-			contextMenuInvocations.delete(token);
-			if (invocation === undefined) return false;
-			if (restoreFocus) focusContextMenuTarget(invocation.context);
-			return true;
-		}
-
-		const contextMenuApi = Object.freeze({
-			version: 1,
-			icons: Object.freeze([...CONTEXT_MENU_ICONS]),
 			register(value) {
-				if (contextMenuContributions.size >= 64) throw new Error("Too many desktop context menu contributions");
 				const contribution = normalizeContextMenuContribution(value);
-				if (contextMenuContributions.has(contribution.id)) throw new Error(`Duplicate context menu contribution: ${contribution.id}`);
-				contextMenuContributions.set(contribution.id, contribution);
-				return () => contextMenuContributions.delete(contribution.id);
-			},
-			collect: collectContextMenuContributions,
-			execute: executeContextMenuContribution,
-			dismiss: dismissContextMenuContribution
-		});
-		const desktopApi = window.dshDesktop && typeof window.dshDesktop === "object" ? window.dshDesktop : {};
-		desktopApi.contextMenu = contextMenuApi;
-		window.dshDesktop = desktopApi;
-		if (typeof window.dispatchEvent === "function" && typeof CustomEvent === "function") {
-			window.dispatchEvent(new CustomEvent("dsh-desktop-context-menu-ready", { detail: contextMenuApi }));
+				const state = this._state;
+				return this.ctx.effect(() => {
+					if (state.contributions.size >= 64) throw new Error("Too many desktop context menu contributions");
+					if (state.contributions.has(contribution.id)) throw new Error(`Duplicate context menu contribution: ${contribution.id}`);
+					state.contributions.set(contribution.id, contribution);
+					return () => {
+						if (state.contributions.get(contribution.id) === contribution) state.contributions.delete(contribution.id);
+					};
+				}, `desktopContextMenu: ${contribution.id}`);
+			}
+
+			[captureContextMenuSymbol](event) {
+				this._state.captured = captureContextMenu(event);
+			}
+
+			[collectContextMenuSymbol]() {
+				const state = this._state;
+				const context = state.captured;
+				state.captured = undefined;
+				if (context === undefined || performance.now() - context.capturedAt > 1_500) return null;
+
+				const evaluated = [];
+				for (const contribution of state.contributions.values()) {
+					if (resolveContributionValue(contribution.when, context, true) !== true) continue;
+					const label = boundedMenuText(resolveContributionValue(contribution.label, context, ""), 120);
+					if (label === undefined) continue;
+					evaluated.push({
+						contribution,
+						group: contribution.group,
+						order: contribution.order,
+						item: {
+							kind: "item",
+							id: contribution.id,
+							label,
+							enabled: resolveContributionValue(contribution.enabled, context, true) !== false,
+							icon: contribution.icon,
+							...(contribution.checked === undefined ? {} : { checked: resolveContributionValue(contribution.checked, context, false) === true }),
+							...(contribution.danger === undefined ? {} : { danger: resolveContributionValue(contribution.danger, context, false) === true })
+						}
+					});
+				}
+				if (evaluated.length === 0) return null;
+				evaluated.sort((left, right) => left.group.localeCompare(right.group) || left.order - right.order || left.item.id.localeCompare(right.item.id));
+
+				const items = [];
+				const actions = new Map();
+				let lastGroup;
+				let separator = 0;
+				for (const entry of evaluated) {
+					if (lastGroup !== undefined && lastGroup !== entry.group) {
+						items.push({ kind: "separator", id: `plugin.separator.${separator++}` });
+					}
+					items.push(entry.item);
+					actions.set(entry.item.id, entry.contribution.onSelect);
+					lastGroup = entry.group;
+				}
+
+				const token = `plugin-menu-${Date.now().toString(36)}-${(++state.token).toString(36)}`;
+				state.invocations.set(token, { context, actions });
+				while (state.invocations.size > 8) state.invocations.delete(state.invocations.keys().next().value);
+				return { token, items };
+			}
+
+			[executeContextMenuSymbol](token, itemId) {
+				const invocation = this._state.invocations.get(token);
+				this._state.invocations.delete(token);
+				if (invocation === undefined) return false;
+				const action = invocation.actions.get(itemId);
+				if (typeof action !== "function") return false;
+				focusContextMenuTarget(invocation.context);
+				void Promise.resolve().then(() => action(invocation.context)).catch((error) => {
+					console.warn(`[desktop-context-menu] ${itemId} failed`, error);
+				});
+				return true;
+			}
+
+			[dismissContextMenuSymbol](token, restoreFocus = true) {
+				const invocation = this._state.invocations.get(token);
+				this._state.invocations.delete(token);
+				if (invocation === undefined) return false;
+				if (restoreFocus) focusContextMenuTarget(invocation.context);
+				return true;
+			}
+
+			[clearContextMenuSymbol]() {
+				this._state.captured = undefined;
+				this._state.contributions.clear();
+				this._state.invocations.clear();
+			}
+		}
+
+		function installContextMenuTransport(service) {
+			const transport = Object.freeze({
+				collect: () => service[collectContextMenuSymbol](),
+				execute: (token, itemId) => service[executeContextMenuSymbol](token, itemId),
+				dismiss: (token, restoreFocus) => service[dismissContextMenuSymbol](token, restoreFocus)
+			});
+			Object.defineProperty(window, CONTEXT_MENU_TRANSPORT_SYMBOL, {
+				configurable: true,
+				enumerable: false,
+				value: transport
+			});
+			return () => {
+				if (window[CONTEXT_MENU_TRANSPORT_SYMBOL] === transport) delete window[CONTEXT_MENU_TRANSPORT_SYMBOL];
+			};
+		}
+
+		function createDesktopContextMenuInspectProvider() {
+			return {
+				manifest: {
+					id: "DesktopContextMenu",
+					description: "DeepSeek Harness Desktop context-menu contribution Service.",
+					methods: [{
+						name: "describe",
+						description: "Return the exact Client Service contract, supported icons, and a lifecycle-safe example.",
+						inputSchema: { type: "object", properties: {}, additionalProperties: false },
+						outputSchema: { description: "Desktop context-menu Service contract." }
+					}]
+				},
+				async query(method) {
+					if (method !== "describe") throw new Error(`Unknown DesktopContextMenu inspect method: ${method}`);
+					return {
+						service: "desktopContextMenu",
+						access: {
+							hardDependency: { inject: ["desktopContextMenu"], expression: "ctx.desktopContextMenu" },
+							optional: { expression: "ctx.get('desktopContextMenu')", requiresUndefinedCheck: true }
+						},
+						properties: [
+							"version: 1",
+							"icons: readonly ContextMenuIcon[]"
+						],
+						methods: [
+							"register(contribution: DesktopContextMenuContribution): () => void"
+						],
+						types: {
+							DesktopContextMenuContribution: "{ id: string; label: string | ((context) => string); icon?: ContextMenuIcon; group?: string; order?: number; when?: (context) => boolean; enabled?: boolean | ((context) => boolean); checked?: boolean | ((context) => boolean); danger?: boolean | ((context) => boolean); onSelect(context): void | Promise<void> }",
+							DesktopContextMenuContext: "{ target: Element; editableElement: HTMLInputElement | HTMLTextAreaElement | HTMLElement | null; editable: boolean; selectionText: string; linkUrl: string; x: number; y: number; event: MouseEvent }"
+						},
+						icons: [...CONTEXT_MENU_ICONS],
+						example: "return { inject: ['desktopContextMenu'], apply(ctx) { ctx.desktopContextMenu.register({ id: 'my-plugin.action', label: 'Run action', icon: 'plugin', onSelect(context) { console.log(context.target) } }) } }"
+					};
+				}
+			};
 		}
 
 		function projectSessions(snapshot) {
@@ -425,11 +499,19 @@ window.__ModuleLoader__.load({
 		};
 
 		exports.name = "desktop-notifications";
-		exports.inject = ["slots", "sessions"];
+		exports.inject = ["slots", "sessions", "cordisInspect"];
 		exports.projectSessions = projectSessions;
 		exports.diffSessionNotifications = diffSessionNotifications;
-		exports.contextMenuApi = contextMenuApi;
+		exports.DesktopContextMenuService = DesktopContextMenuService;
+		exports.createDesktopContextMenuInspectProvider = createDesktopContextMenuInspectProvider;
 		exports.apply = function apply(ctx) {
+			const desktopContextMenu = new DesktopContextMenuService(ctx);
+			ctx.effect(() => installContextMenuTransport(desktopContextMenu), "desktop-context-menu: Electron transport");
+			ctx.effect(
+				() => ctx.cordisInspect.register(createDesktopContextMenuInspectProvider()),
+				"desktop-context-menu: inspect provider"
+			);
+
 			let previous = projectSessions(ctx.sessions.list.getSnapshot());
 			const onSessionsChanged = () => {
 				const next = projectSessions(ctx.sessions.list.getSnapshot());
@@ -450,12 +532,11 @@ window.__ModuleLoader__.load({
 			window.addEventListener("message", onDesktopMessage);
 			ctx.effect(() => () => window.removeEventListener("message", onDesktopMessage), "desktop-notifications: notification click");
 
-			const onContextMenu = (event) => { capturedContextMenu = captureContextMenu(event); };
+			const onContextMenu = (event) => { desktopContextMenu[captureContextMenuSymbol](event); };
 			window.addEventListener("contextmenu", onContextMenu, true);
 			ctx.effect(() => () => {
 				window.removeEventListener("contextmenu", onContextMenu, true);
-				capturedContextMenu = undefined;
-				contextMenuInvocations.clear();
+				desktopContextMenu[clearContextMenuSymbol]();
 			}, "desktop-context-menu: capture plugin context");
 
 			ctx.slots.inject("settings.section", () => ctx.slots.register({

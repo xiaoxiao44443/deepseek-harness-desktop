@@ -5,7 +5,7 @@ import { app, BrowserWindow, clipboard, ipcMain, nativeTheme, shell } from 'elec
 import type { ContextMenuParams, WebFrameMain } from 'electron'
 import type { ColorTheme, DesktopPlatform, DesktopState, DevelopmentPluginRequest, HarnessLifecycle, PluginInitializationFailure, TitleMenuAction, WindowAction } from '../shared/contracts.js'
 import type { DesktopContextMenuActionRequest, DesktopContextMenuRequest, DesktopPointerInput, PluginContextMenuCollection } from '../shared/context-menu.js'
-import { parsePluginContextMenuCollection } from '../shared/context-menu.js'
+import { DESKTOP_CONTEXT_MENU_TRANSPORT_KEY, parsePluginContextMenuCollection } from '../shared/context-menu.js'
 import type { HarnessRuntimeManager } from './harness-runtime.js'
 import type { DevelopmentService } from './development-service.js'
 import { parsePluginInitializationFailure, type PluginRecoveryService } from './plugin-recovery.js'
@@ -14,6 +14,7 @@ import { appendPluginContextMenuItems, BUILTIN_CONTEXT_MENU_ACTIONS, buildBuilti
 const STATE_CHANNEL = 'desktop:state'
 const CONTEXT_MENU_CHANNEL = 'desktop:context-menu'
 const POINTER_INPUT_CHANNEL = 'desktop:pointer-input'
+const CONTEXT_MENU_TRANSPORT_EXPRESSION = `globalThis[Symbol.for(${JSON.stringify(DESKTOP_CONTEXT_MENU_TRANSPORT_KEY)})]`
 const HARNESS_LOAD_TIMEOUT_MS = 45_000
 const HARNESS_LOAD_PROBE_INTERVAL_MS = 100
 const HARNESS_LOAD_READY_FALLBACK_MS = 3_000
@@ -391,7 +392,7 @@ export class WindowController {
   }
 
   private async collectPluginContextMenu(frame: WebFrameMain): Promise<PluginContextMenuCollection | undefined> {
-    const collection = frame.executeJavaScript('window.dshDesktop?.contextMenu?.collect?.() ?? null')
+    const collection = frame.executeJavaScript(`${CONTEXT_MENU_TRANSPORT_EXPRESSION}?.collect?.() ?? null`)
       .catch(() => undefined)
     const timeout = new Promise<undefined>((resolve) => {
       setTimeout(resolve, 75)
@@ -477,7 +478,7 @@ export class WindowController {
     const token = pending.pluginToken
     if (token === undefined || pending.frame.isDestroyed()) return
     await pending.frame.executeJavaScript(
-      `window.dshDesktop?.contextMenu?.execute?.(${JSON.stringify(token)}, ${JSON.stringify(itemId)})`,
+      `${CONTEXT_MENU_TRANSPORT_EXPRESSION}?.execute?.(${JSON.stringify(token)}, ${JSON.stringify(itemId)})`,
     ).catch(() => undefined)
   }
 
@@ -494,7 +495,7 @@ export class WindowController {
     const token = pending.pluginToken
     if (token === undefined || pending.frame.isDestroyed()) return
     await pending.frame.executeJavaScript(
-      `window.dshDesktop?.contextMenu?.dismiss?.(${JSON.stringify(token)}, ${JSON.stringify(restoreFocus)})`,
+      `${CONTEXT_MENU_TRANSPORT_EXPRESSION}?.dismiss?.(${JSON.stringify(token)}, ${JSON.stringify(restoreFocus)})`,
     ).catch(() => undefined)
   }
 

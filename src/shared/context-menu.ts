@@ -18,6 +18,8 @@ export const CONTEXT_MENU_ICONS = [
   'refresh',
 ] as const
 
+export const DESKTOP_CONTEXT_MENU_TRANSPORT_KEY = 'dsh.desktop.context-menu.transport.v1'
+
 export type ContextMenuIcon = (typeof CONTEXT_MENU_ICONS)[number]
 
 export interface ContextMenuActionEntry {

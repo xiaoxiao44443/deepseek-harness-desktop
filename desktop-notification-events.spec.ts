@@ -1,3 +1,5 @@
+import { createRequire } from 'node:module'
+import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 const originalWindow = globalThis.window
@@ -7,7 +9,7 @@ afterEach(() => {
   Object.assign(globalThis, { window: originalWindow })
 })
 
-async function loadClientModule(): Promise<Record<string, unknown>> {
+async function loadClientModule(overrides: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
   let factory: ((require: (id: string) => unknown) => Record<string, unknown>) | undefined
   Object.assign(globalThis, {
     window: {
@@ -19,6 +21,21 @@ async function loadClientModule(): Promise<Record<string, unknown>> {
   await import('./resources/dsh-desktop-bridge/lib/client.js')
   if (factory === undefined) throw new Error('Client bundle did not register its module factory')
   return factory((id) => {
+    if (Object.hasOwn(overrides, id)) return overrides[id]
+    if (id === '@deepseek-ai/cordis') {
+      return {
+        Service: class Service {
+          protected ctx: Record<string, unknown>
+          name: string
+
+          constructor(ctx: Record<string, unknown>, name: string) {
+            this.ctx = ctx
+            this.name = name
+            ctx[name] = this
+          }
+        },
+      }
+    }
     if (id === 'react') return {}
     if (id === '@deepseek-ai/dsh-client-ui-primitives') return {}
     throw new Error(`Unexpected client dependency: ${id}`)
@@ -26,25 +43,86 @@ async function loadClientModule(): Promise<Record<string, unknown>> {
 }
 
 describe('desktop notification session transitions', () => {
-  it('publishes a namespaced context-menu contribution registry', async () => {
+  it('provides the context-menu registry as a lifecycle-owned Cordis Service', async () => {
     const client = await loadClientModule()
-    const api = client.contextMenuApi as {
+    const DesktopContextMenuService = client.DesktopContextMenuService as new (ctx: Record<string, unknown>) => {
+      name: string
       version: number
       icons: readonly string[]
-      register(value: Record<string, unknown>): () => boolean
+      register(value: Record<string, unknown>): () => void
     }
-    expect(api.version).toBe(1)
-    expect(api.icons).toContain('archive')
+    const cleanups: Array<() => unknown> = []
+    const ctx: Record<string, unknown> = {
+      effect: vi.fn((setup: () => () => unknown) => {
+        const cleanup = setup()
+        cleanups.push(cleanup)
+        return cleanup
+      }),
+    }
+    const service = new DesktopContextMenuService(ctx)
+    expect(ctx.desktopContextMenu).toBe(service)
+    expect(service.name).toBe('desktopContextMenu')
+    expect(service.version).toBe(1)
+    expect(service.icons).toContain('archive')
     const contribution = {
       id: 'archive-manager.archive-session',
       label: '归档当前会话',
       icon: 'archive',
       onSelect: vi.fn(),
     }
-    const dispose = api.register(contribution)
-    expect(() => api.register(contribution)).toThrow(/Duplicate context menu contribution/u)
-    expect(dispose()).toBe(true)
-    expect(() => api.register(contribution)).not.toThrow()
+    const dispose = service.register(contribution)
+    expect(() => service.register(contribution)).toThrow(/Duplicate context menu contribution/u)
+    expect(dispose()).toBeUndefined()
+    expect(() => service.register(contribution)).not.toThrow()
+    expect(cleanups).toHaveLength(2)
+  })
+
+  it('publishes the desktop menu Service through the official inspect registry contract', async () => {
+    const client = await loadClientModule()
+    const createProvider = client.createDesktopContextMenuInspectProvider as () => {
+      manifest: { id: string; methods: Array<{ name: string }> }
+      query(method: string): Promise<Record<string, unknown>>
+    }
+    const provider = createProvider()
+    expect(provider.manifest).toMatchObject({
+      id: 'DesktopContextMenu',
+      methods: [{ name: 'describe' }],
+    })
+    await expect(provider.query('describe')).resolves.toMatchObject({
+      service: 'desktopContextMenu',
+      access: { hardDependency: { inject: ['desktopContextMenu'] } },
+    })
+  })
+
+  it('binds menu registrations to the calling Fiber with the real Cordis runtime', async () => {
+    const projectRequire = createRequire(import.meta.url)
+    const dshRequire = createRequire(projectRequire.resolve('@deepseek-ai/dsh/package.json'))
+    const cordis = await import(pathToFileURL(dshRequire.resolve('@deepseek-ai/cordis')).href) as {
+      Context: new () => {
+        fiber: { dispose(): Promise<void> }
+        plugin(plugin: unknown): Promise<{ dispose(): Promise<void> }>
+        desktopContextMenu: { register(value: Record<string, unknown>): () => void }
+      }
+    }
+    const client = await loadClientModule({ '@deepseek-ai/cordis': cordis })
+    const DesktopContextMenuService = client.DesktopContextMenuService as new (ctx: unknown) => unknown
+    const root = new cordis.Context()
+    await root.plugin(DesktopContextMenuService)
+
+    const contribution = {
+      id: 'fiber-owned.action',
+      label: 'Fiber action',
+      onSelect: vi.fn(),
+    }
+    const consumer = Object.assign((ctx: typeof root) => {
+      ctx.desktopContextMenu.register(contribution)
+    }, { inject: ['desktopContextMenu'] })
+    const consumerFiber = await root.plugin(consumer)
+    expect(() => root.desktopContextMenu.register(contribution)).toThrow(/Duplicate context menu contribution/u)
+
+    await consumerFiber.dispose()
+    expect(() => root.desktopContextMenu.register(contribution)).not.toThrow()
+    await root.fiber.dispose()
   })
 
   it('suppresses the baseline and reports completion only after a running transition', async () => {

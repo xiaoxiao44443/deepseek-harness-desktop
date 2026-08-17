@@ -83,6 +83,7 @@ vi.mock('electron', async () => {
 })
 
 import { WindowController } from './src/main/window-controller.js'
+import { DESKTOP_CONTEXT_MENU_TRANSPORT_KEY } from './src/shared/context-menu.js'
 
 describe('WindowController Harness reload', () => {
   it('accepts main-process frame navigation and remounts a reused URL', async () => {
@@ -270,6 +271,83 @@ describe('WindowController Harness reload', () => {
     expect(window?.webContents.copyImageAt).toHaveBeenCalledWith(96, 128)
   })
 
+  it('routes Cordis menu contributions through the internal Electron transport', async () => {
+    const runtime = Object.assign(new EventEmitter(), {
+      harnessHome: '/path/that/does/not/exist',
+      updateState: { status: 'idle' },
+      checkForUpdates: vi.fn(),
+    })
+    const development = Object.assign(new EventEmitter(), {
+      state: { pnpmVersion: '11.19.0', restarting: false, commandRunning: false },
+      choosePatch: vi.fn(),
+      clearPatch: vi.fn(),
+      restartHarness: vi.fn(),
+      runPlugin: vi.fn(),
+    })
+    const controller = new WindowController(runtime as never, development as never)
+    await controller.create()
+
+    const url = 'http://127.0.0.1:43214'
+    const transport = `globalThis[Symbol.for(${JSON.stringify(DESKTOP_CONTEXT_MENU_TRANSPORT_KEY)})]`
+    const frame = {
+      parent: {},
+      name: 'harness-frame',
+      url,
+      isDestroyed: () => false,
+      executeJavaScript: vi.fn(async (script: string) => {
+        if (script === 'document.readyState') return 'complete'
+        if (script === `${transport}?.collect?.() ?? null`) {
+          return {
+            token: 'cordis-menu-token',
+            items: [{ kind: 'item', id: 'plugin.archive', label: '归档', enabled: true, icon: 'archive' }],
+          }
+        }
+        return true
+      }),
+    }
+    const window = electronMocks.window
+    expect(window).toBeDefined()
+    if (window === undefined) return
+    window.webContents.mainFrame.framesInSubtree = [frame]
+    await controller.showHarness(url, '0.1.0')
+
+    window.webContents.emit('context-menu', { preventDefault: vi.fn() }, {
+      x: 256,
+      y: 192,
+      frame,
+      frameURL: url,
+      linkURL: '',
+      selectionText: '',
+      isEditable: false,
+      editFlags: {
+        canUndo: false,
+        canRedo: false,
+        canCut: false,
+        canCopy: false,
+        canPaste: false,
+        canDelete: false,
+        canSelectAll: false,
+        canEditRichly: false,
+      },
+    })
+
+    await vi.waitFor(() => {
+      expect(window.webContents.send.mock.calls.some(([channel]) => channel === 'desktop:context-menu')).toBe(true)
+    })
+    const request = window.webContents.send.mock.calls.find(([channel]) => channel === 'desktop:context-menu')?.[1]
+    expect(request).toMatchObject({
+      items: expect.arrayContaining([expect.objectContaining({ id: 'plugin.archive', label: '归档' })]),
+    })
+    const select = electronMocks.ipcHandlers.get('desktop:context-menu-select')
+    expect(select).toBeDefined()
+    if (select !== undefined && request !== undefined) {
+      await select({ sender: window.webContents }, { requestId: request.requestId, itemId: 'plugin.archive' })
+    }
+    expect(frame.executeJavaScript).toHaveBeenCalledWith(
+      `${transport}?.execute?.("cordis-menu-token", "plugin.archive")`,
+    )
+  })
+
   it('opens the core context menu inside desktop shell inputs', async () => {
     const runtime = Object.assign(new EventEmitter(), {
       harnessHome: '/path/that/does/not/exist',
@@ -324,7 +402,7 @@ describe('WindowController Harness reload', () => {
       ]),
     })
     expect(window.webContents.mainFrame.executeJavaScript).not.toHaveBeenCalledWith(
-      'window.dshDesktop?.contextMenu?.collect?.() ?? null',
+      `globalThis[Symbol.for(${JSON.stringify(DESKTOP_CONTEXT_MENU_TRANSPORT_KEY)})]?.collect?.() ?? null`,
     )
     const dismiss = electronMocks.ipcHandlers.get('desktop:context-menu-dismiss')
     expect(dismiss).toBeDefined()

@@ -79,12 +79,13 @@ Patch 是 Harness Web 服务的启动参数，因此要通过桌面菜单应用�
 
 桌面端的基础右键菜单由 Electron 直接从 Harness iframe 的 `context-menu` 事件生成，即使 `dsh-desktop-bridge` Client 插件未加载，撤销、剪切、复制、粘贴、全选和链接操作仍然可用。React 壳层只负责绘制菜单，Harness 页面不会获得 Electron IPC。
 
-Client 插件可以通过页面内的可选注册表追加菜单项。贡献只包含声明与留在 iframe 内执行的回调；桌面壳只接收经过限长、命名空间和图标白名单处理的菜单描述。
+`dsh-desktop-bridge` Client 插件通过官方 Cordis 机制提供 `desktopContextMenu` Service。其他 Client 插件用 `inject` 声明依赖并追加菜单项；注册属于调用插件自己的 Fiber，插件卸载或热替换时会由 Cordis 自动撤销。Electron IPC 只是 Service Provider 内部的传输实现，不是插件 API。桌面壳只接收经过限长、命名空间和图标白名单处理的菜单描述，回调始终留在 Harness iframe 内执行。
 
 ```js
-const contextMenu = window.dshDesktop?.contextMenu
-if (contextMenu) {
-  const dispose = contextMenu.register({
+export const inject = ['desktopContextMenu']
+
+export function apply(ctx) {
+  ctx.desktopContextMenu.register({
     id: 'archive-manager.archive-session',
     label: '归档当前会话',
     icon: 'archive',
@@ -97,11 +98,12 @@ if (contextMenu) {
       if (sessionId) await archiveSession(sessionId)
     },
   })
-  ctx.effect(() => dispose, 'archive-manager: desktop context menu')
 }
 ```
 
-`label`、`enabled`、`checked`、`danger` 和 `when` 均可使用基于点击上下文的函数。上下文提供 `target`、`editableElement`、`editable`、`selectionText`、`linkUrl`、`x`、`y` 和原始 `event`。可用图标由 `window.dshDesktop.contextMenu.icons` 给出；未知图标会回退为 `plugin`。如果插件可能早于桥接 Client 加载，可监听一次 `dsh-desktop-context-menu-ready` 事件后再注册。
+`label`、`enabled`、`checked`、`danger` 和 `when` 均可使用基于点击上下文的函数。上下文提供 `target`、`editableElement`、`editable`、`selectionText`、`linkUrl`、`x`、`y` 和原始 `event`。可用图标由 `ctx.desktopContextMenu.icons` 给出；未知图标会回退为 `plugin`。
+
+仅把菜单当作可选桌面增强的跨平台插件，可以使用 `ctx.get('desktopContextMenu')?.register(...)`，不必声明硬依赖。动态 Cordis 插件可通过 `DesktopContextMenu.describe` Inspect Provider 获取准确的 Service 合约、图标列表和示例，不需要读取页面全局变量。
 
 ## 更新策略
 
