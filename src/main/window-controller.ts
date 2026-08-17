@@ -1,14 +1,18 @@
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { readFile } from 'node:fs/promises'
-import { app, BrowserWindow, ipcMain, nativeTheme, shell } from 'electron'
-import type { WebFrameMain } from 'electron'
+import { app, BrowserWindow, clipboard, ipcMain, nativeTheme, shell } from 'electron'
+import type { ContextMenuParams, WebFrameMain } from 'electron'
 import type { ColorTheme, DesktopPlatform, DesktopState, DevelopmentPluginRequest, HarnessLifecycle, PluginInitializationFailure, TitleMenuAction, WindowAction } from '../shared/contracts.js'
+import type { DesktopContextMenuActionRequest, DesktopContextMenuRequest, PluginContextMenuCollection } from '../shared/context-menu.js'
+import { parsePluginContextMenuCollection } from '../shared/context-menu.js'
 import type { HarnessRuntimeManager } from './harness-runtime.js'
 import type { DevelopmentService } from './development-service.js'
 import { parsePluginInitializationFailure, type PluginRecoveryService } from './plugin-recovery.js'
+import { appendPluginContextMenuItems, BUILTIN_CONTEXT_MENU_ACTIONS, buildBuiltinContextMenuItems } from './context-menu.js'
 
 const STATE_CHANNEL = 'desktop:state'
+const CONTEXT_MENU_CHANNEL = 'desktop:context-menu'
 const HARNESS_LOAD_TIMEOUT_MS = 45_000
 const HARNESS_LOAD_PROBE_INTERVAL_MS = 100
 const HARNESS_LOAD_READY_FALLBACK_MS = 3_000
@@ -20,6 +24,15 @@ interface PendingHarnessLoad {
   reject: (error: Error) => void
   timer: NodeJS.Timeout
   readyFallback: NodeJS.Timeout
+}
+
+interface PendingDesktopContextMenu {
+  requestId: string
+  frame: WebFrameMain
+  linkURL: string
+  selectionText: string
+  allowedItemIds: Set<string>
+  pluginToken?: string
 }
 
 export class WindowController {
@@ -40,6 +53,8 @@ export class WindowController {
   private themeProbeInFlight = false
   private pluginFailureProbeTimer: NodeJS.Timeout | undefined
   private pluginFailureProbeInFlight = false
+  private contextMenuSequence = 0
+  private pendingContextMenu: PendingDesktopContextMenu | undefined
 
   constructor(
     private readonly runtime: HarnessRuntimeManager,
@@ -94,6 +109,7 @@ export class WindowController {
       this.stopThemeSync()
       this.stopPluginFailureProbe()
       this.cancelPendingHarnessLoad(new Error('桌面窗口已关闭。'))
+      this.pendingContextMenu = undefined
       this.window = undefined
     })
 
@@ -107,6 +123,11 @@ export class WindowController {
     window.webContents.on('before-input-event', (event, input) => {
       const key = input.key.toLowerCase()
       if (key === 'f5' || (key === 'r' && (input.control || input.meta))) event.preventDefault()
+    })
+    window.webContents.on('context-menu', (event, params) => {
+      if (!this.isHarnessContextMenu(params)) return
+      event.preventDefault()
+      void this.openContextMenu(params)
     })
     window.webContents.on('will-frame-navigate', (details) => {
       if (details.isMainFrame) return
@@ -154,6 +175,7 @@ export class WindowController {
   }
 
   setRuntimePreparing(): void {
+    this.resetContextMenu()
     this.stopThemeSync()
     this.stopPluginFailureProbe()
     this.cancelPendingHarnessLoad(new Error('Harness 运行时正在准备。'))
@@ -169,6 +191,7 @@ export class WindowController {
   }
 
   setHarnessStarting(version: string): void {
+    this.resetContextMenu()
     this.stopThemeSync()
     this.stopPluginFailureProbe()
     this.cancelPendingHarnessLoad(new Error('Harness 启动目标已变更。'))
@@ -182,6 +205,7 @@ export class WindowController {
   }
 
   async showHarness(url: string, version: string): Promise<void> {
+    this.resetContextMenu()
     this.cancelPendingHarnessLoad(new Error('Harness 页面加载目标已变更。'))
     this.harnessVersion = version
     this.harnessUrl = url
@@ -209,6 +233,7 @@ export class WindowController {
   }
 
   setHarnessError(message: string, pluginFailure?: PluginInitializationFailure): void {
+    this.resetContextMenu()
     this.stopThemeSync()
     this.stopPluginFailureProbe()
     this.cancelPendingHarnessLoad(new Error(message))
@@ -268,6 +293,176 @@ export class WindowController {
     ipcMain.handle('desktop:plugin-recovery-disable', async () => await this.recoverFailedPlugin())
     ipcMain.handle('desktop:plugin-recovery-restore', async (_event, entryId: string) => await this.restoreRecoveredPlugin(entryId))
     ipcMain.handle('desktop:development-run-plugin', (_event, request: DevelopmentPluginRequest) => this.development.runPlugin(request))
+    ipcMain.handle('desktop:context-menu-select', async (event, request: DesktopContextMenuActionRequest) => {
+      if (event.sender !== this.window?.webContents) return
+      await this.selectContextMenuItem(request)
+    })
+    ipcMain.handle('desktop:context-menu-dismiss', async (event, requestId: string, restoreFocus: boolean) => {
+      if (event.sender !== this.window?.webContents) return
+      await this.dismissContextMenu(requestId, restoreFocus !== false)
+    })
+  }
+
+  private isHarnessContextMenu(params: ContextMenuParams): boolean {
+    const frame = params.frame
+    return frame !== null
+      && !frame.isDestroyed()
+      && frame.parent !== null
+      && this.harnessOrigin !== undefined
+      && this.safeOrigin(params.frameURL) === this.harnessOrigin
+  }
+
+  private async openContextMenu(params: ContextMenuParams): Promise<void> {
+    const frame = params.frame
+    if (frame === null || frame.isDestroyed() || !this.isHarnessContextMenu(params)) return
+    const sequence = ++this.contextMenuSequence
+    const previous = this.pendingContextMenu
+    this.pendingContextMenu = undefined
+    if (previous !== undefined) void this.releasePluginContextMenu(previous, false)
+
+    const builtins = buildBuiltinContextMenuItems(params)
+    const pluginCollection = await this.collectPluginContextMenu(frame)
+    if (sequence !== this.contextMenuSequence || frame.isDestroyed() || this.safeOrigin(frame.url) !== this.harnessOrigin) {
+      if (pluginCollection !== undefined) void this.releasePluginContextMenu({
+        requestId: '',
+        frame,
+        linkURL: '',
+        selectionText: '',
+        allowedItemIds: new Set(),
+        pluginToken: pluginCollection.token,
+      }, false)
+      return
+    }
+
+    const items = appendPluginContextMenuItems(builtins, pluginCollection?.items ?? [])
+    if (!items.some((entry) => entry.kind === 'item')) return
+    const requestId = `menu-${Date.now().toString(36)}-${sequence.toString(36)}`
+    this.pendingContextMenu = {
+      requestId,
+      frame,
+      linkURL: params.linkURL,
+      selectionText: params.selectionText,
+      allowedItemIds: new Set(items.flatMap((entry) => entry.kind === 'item' && entry.enabled ? [entry.id] : [])),
+      ...(pluginCollection === undefined ? {} : { pluginToken: pluginCollection.token }),
+    }
+    const request: DesktopContextMenuRequest = {
+      requestId,
+      x: params.x,
+      y: params.y,
+      items,
+    }
+    const window = this.window
+    if (window === undefined || window.isDestroyed() || window.webContents.isLoadingMainFrame()) return
+    window.webContents.send(CONTEXT_MENU_CHANNEL, request)
+  }
+
+  private async collectPluginContextMenu(frame: WebFrameMain): Promise<PluginContextMenuCollection | undefined> {
+    const collection = frame.executeJavaScript('window.dshDesktop?.contextMenu?.collect?.() ?? null')
+      .catch(() => undefined)
+    const timeout = new Promise<undefined>((resolve) => {
+      setTimeout(resolve, 75)
+    })
+    return parsePluginContextMenuCollection(await Promise.race([collection, timeout]))
+  }
+
+  private async selectContextMenuItem(request: DesktopContextMenuActionRequest): Promise<void> {
+    if (request === null || typeof request !== 'object') return
+    if (typeof request.requestId !== 'string' || typeof request.itemId !== 'string') return
+    const pending = this.pendingContextMenu
+    if (pending === undefined || pending.requestId !== request.requestId || !pending.allowedItemIds.has(request.itemId)) return
+    this.pendingContextMenu = undefined
+
+    const builtin = BUILTIN_CONTEXT_MENU_ACTIONS[request.itemId]
+    if (builtin !== undefined) {
+      await this.executeBuiltinContextMenuAction(pending, builtin)
+      await this.releasePluginContextMenu(pending, false)
+      return
+    }
+    if (request.itemId.startsWith('plugin.') && pending.pluginToken !== undefined) {
+      await this.executePluginContextMenuItem(pending, request.itemId)
+    }
+  }
+
+  private async dismissContextMenu(requestId: string, restoreFocus: boolean): Promise<void> {
+    if (typeof requestId !== 'string' || requestId.length === 0 || requestId.length > 128) return
+    const pending = this.pendingContextMenu
+    if (pending === undefined || pending.requestId !== requestId) return
+    this.pendingContextMenu = undefined
+    if (restoreFocus) await this.focusContextMenuFrame(pending.frame)
+    await this.releasePluginContextMenu(pending, restoreFocus)
+  }
+
+  private async executeBuiltinContextMenuAction(
+    pending: PendingDesktopContextMenu,
+    action: (typeof BUILTIN_CONTEXT_MENU_ACTIONS)[string],
+  ): Promise<void> {
+    if (action === 'open-link') {
+      if (/^https?:\/\//iu.test(pending.linkURL)) await shell.openExternal(pending.linkURL)
+      return
+    }
+    if (action === 'copy-link') {
+      if (/^https?:\/\//iu.test(pending.linkURL)) clipboard.writeText(pending.linkURL)
+      return
+    }
+    if (pending.frame.isDestroyed()) return
+
+    const command = action === 'select-all' ? 'selectAll' : action
+    let executed = false
+    try {
+      executed = await pending.frame.executeJavaScript(`(() => {
+        window.focus()
+        const active = document.activeElement
+        if (active instanceof HTMLElement) active.focus({ preventScroll: true })
+        return document.execCommand(${JSON.stringify(command)})
+      })()`) === true
+    } catch {
+      // The frame may navigate while the menu is open. The webContents fallback
+      // below still handles the common case where Chromium kept its edit target.
+    }
+    if (executed) return
+
+    const contents = this.window?.webContents
+    if (contents === undefined || contents.isDestroyed()) return
+    if (action === 'undo') contents.undo()
+    else if (action === 'redo') contents.redo()
+    else if (action === 'cut') contents.cut()
+    else if (action === 'copy') {
+      if (pending.selectionText.length > 0) clipboard.writeText(pending.selectionText)
+      else contents.copy()
+    } else if (action === 'paste') contents.paste()
+    else if (action === 'select-all') contents.selectAll()
+  }
+
+  private async executePluginContextMenuItem(pending: PendingDesktopContextMenu, itemId: string): Promise<void> {
+    const token = pending.pluginToken
+    if (token === undefined || pending.frame.isDestroyed()) return
+    await pending.frame.executeJavaScript(
+      `window.dshDesktop?.contextMenu?.execute?.(${JSON.stringify(token)}, ${JSON.stringify(itemId)})`,
+    ).catch(() => undefined)
+  }
+
+  private async focusContextMenuFrame(frame: WebFrameMain): Promise<void> {
+    if (frame.isDestroyed()) return
+    await frame.executeJavaScript(`(() => {
+      window.focus()
+      const active = document.activeElement
+      if (active instanceof HTMLElement) active.focus({ preventScroll: true })
+    })()`).catch(() => undefined)
+  }
+
+  private async releasePluginContextMenu(pending: PendingDesktopContextMenu, restoreFocus: boolean): Promise<void> {
+    const token = pending.pluginToken
+    if (token === undefined || pending.frame.isDestroyed()) return
+    await pending.frame.executeJavaScript(
+      `window.dshDesktop?.contextMenu?.dismiss?.(${JSON.stringify(token)}, ${JSON.stringify(restoreFocus)})`,
+    ).catch(() => undefined)
+  }
+
+  private resetContextMenu(): void {
+    this.contextMenuSequence += 1
+    const pending = this.pendingContextMenu
+    this.pendingContextMenu = undefined
+    if (pending !== undefined) void this.releasePluginContextMenu(pending, false)
   }
 
   private windowAction(action: WindowAction): void {

@@ -26,6 +26,27 @@ async function loadClientModule(): Promise<Record<string, unknown>> {
 }
 
 describe('desktop notification session transitions', () => {
+  it('publishes a namespaced context-menu contribution registry', async () => {
+    const client = await loadClientModule()
+    const api = client.contextMenuApi as {
+      version: number
+      icons: readonly string[]
+      register(value: Record<string, unknown>): () => boolean
+    }
+    expect(api.version).toBe(1)
+    expect(api.icons).toContain('archive')
+    const contribution = {
+      id: 'archive-manager.archive-session',
+      label: '归档当前会话',
+      icon: 'archive',
+      onSelect: vi.fn(),
+    }
+    const dispose = api.register(contribution)
+    expect(() => api.register(contribution)).toThrow(/Duplicate context menu contribution/u)
+    expect(dispose()).toBe(true)
+    expect(() => api.register(contribution)).not.toThrow()
+  })
+
   it('suppresses the baseline and reports completion only after a running transition', async () => {
     const client = await loadClientModule()
     const project = client.projectSessions as (value: unknown) => Map<string, unknown>

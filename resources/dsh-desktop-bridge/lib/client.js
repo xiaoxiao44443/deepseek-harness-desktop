@@ -14,6 +14,184 @@ window.__ModuleLoader__.load({
 			permissionRequests: true,
 			questions: true
 		});
+		const CONTEXT_MENU_ICONS = new Set([
+			"copy", "cut", "paste", "undo", "redo", "select-all", "external-link", "link", "plugin",
+			"archive", "trash", "edit", "folder", "settings", "terminal", "sparkles", "refresh"
+		]);
+		const contextMenuContributions = new Map();
+		const contextMenuInvocations = new Map();
+		let capturedContextMenu;
+		let contextMenuToken = 0;
+
+		function boundedMenuText(value, maxLength) {
+			if (typeof value !== "string") return undefined;
+			const text = value.trim();
+			return text.length > 0 && text.length <= maxLength && !/[\r\n\0]/u.test(text) ? text : undefined;
+		}
+
+		function menuTarget(value) {
+			if (value instanceof Element) return value;
+			if (value instanceof Node) return value.parentElement;
+			return null;
+		}
+
+		function editableMenuTarget(target) {
+			const candidate = target?.closest("input, textarea, [contenteditable]");
+			if (candidate instanceof HTMLTextAreaElement) return candidate.disabled || candidate.readOnly ? null : candidate;
+			if (candidate instanceof HTMLInputElement) {
+				const textTypes = new Set(["text", "search", "email", "url", "tel", "password", "number"]);
+				return !candidate.disabled && !candidate.readOnly && textTypes.has(candidate.type) ? candidate : null;
+			}
+			return candidate instanceof HTMLElement && candidate.isContentEditable ? candidate : null;
+		}
+
+		function selectedMenuText(editable) {
+			if (editable instanceof HTMLInputElement || editable instanceof HTMLTextAreaElement) {
+				const start = editable.selectionStart;
+				const end = editable.selectionEnd;
+				if (typeof start === "number" && typeof end === "number" && end > start) return editable.value.slice(start, end);
+			}
+			return window.getSelection()?.toString() ?? "";
+		}
+
+		function captureContextMenu(event) {
+			const target = menuTarget(event.target);
+			if (target === null) return undefined;
+			const editable = editableMenuTarget(target);
+			const link = target.closest("a[href]");
+			return {
+				target,
+				editableElement: editable,
+				editable: editable !== null,
+				selectionText: selectedMenuText(editable),
+				linkUrl: link instanceof HTMLAnchorElement ? link.href : "",
+				x: event.clientX,
+				y: event.clientY,
+				event,
+				capturedAt: performance.now()
+			};
+		}
+
+		function normalizeContextMenuContribution(value) {
+			if (value === null || typeof value !== "object") throw new TypeError("Context menu contribution must be an object");
+			const rawId = boundedMenuText(value.id, 80)?.replace(/^plugin\./u, "");
+			if (!rawId || !/^[a-z0-9][a-z0-9._:-]{0,79}$/iu.test(rawId)) throw new TypeError("Context menu contribution id is invalid");
+			if (typeof value.onSelect !== "function") throw new TypeError("Context menu contribution requires onSelect(context)");
+			if (typeof value.label !== "string" && typeof value.label !== "function") throw new TypeError("Context menu contribution label is invalid");
+			const group = boundedMenuText(value.group, 48) ?? "plugins";
+			const order = Number.isFinite(value.order) ? Math.max(-10_000, Math.min(10_000, value.order)) : 0;
+			return {
+				...value,
+				id: `plugin.${rawId}`,
+				group,
+				order,
+				icon: CONTEXT_MENU_ICONS.has(value.icon) ? value.icon : "plugin"
+			};
+		}
+
+		function resolveContributionValue(value, context, fallback) {
+			try { return typeof value === "function" ? value(context) : value ?? fallback; }
+			catch (error) {
+				console.warn("[desktop-context-menu] contribution predicate failed", error);
+				return fallback;
+			}
+		}
+
+		function collectContextMenuContributions() {
+			const context = capturedContextMenu;
+			capturedContextMenu = undefined;
+			if (context === undefined || performance.now() - context.capturedAt > 1_500) return null;
+
+			const evaluated = [];
+			for (const contribution of contextMenuContributions.values()) {
+				if (resolveContributionValue(contribution.when, context, true) !== true) continue;
+				const label = boundedMenuText(resolveContributionValue(contribution.label, context, ""), 120);
+				if (label === undefined) continue;
+				evaluated.push({
+					contribution,
+					group: contribution.group,
+					order: contribution.order,
+					item: {
+						kind: "item",
+						id: contribution.id,
+						label,
+						enabled: resolveContributionValue(contribution.enabled, context, true) !== false,
+						icon: contribution.icon,
+						...(contribution.checked === undefined ? {} : { checked: resolveContributionValue(contribution.checked, context, false) === true }),
+						...(contribution.danger === undefined ? {} : { danger: resolveContributionValue(contribution.danger, context, false) === true })
+					}
+				});
+			}
+			if (evaluated.length === 0) return null;
+			evaluated.sort((left, right) => left.group.localeCompare(right.group) || left.order - right.order || left.item.id.localeCompare(right.item.id));
+
+			const items = [];
+			const actions = new Map();
+			let lastGroup;
+			let separator = 0;
+			for (const entry of evaluated) {
+				if (lastGroup !== undefined && lastGroup !== entry.group) {
+					items.push({ kind: "separator", id: `plugin.separator.${separator++}` });
+				}
+				items.push(entry.item);
+				actions.set(entry.item.id, entry.contribution.onSelect);
+				lastGroup = entry.group;
+			}
+
+			const token = `plugin-menu-${Date.now().toString(36)}-${(++contextMenuToken).toString(36)}`;
+			contextMenuInvocations.set(token, { context, actions });
+			while (contextMenuInvocations.size > 8) contextMenuInvocations.delete(contextMenuInvocations.keys().next().value);
+			return { token, items };
+		}
+
+		function focusContextMenuTarget(context) {
+			const target = context.editableElement ?? context.target.closest("button, a[href], input, textarea, [tabindex], [contenteditable]");
+			if (target instanceof HTMLElement) {
+				try { target.focus({ preventScroll: true }); } catch {}
+			}
+		}
+
+		function executeContextMenuContribution(token, itemId) {
+			const invocation = contextMenuInvocations.get(token);
+			contextMenuInvocations.delete(token);
+			if (invocation === undefined) return false;
+			const action = invocation.actions.get(itemId);
+			if (typeof action !== "function") return false;
+			focusContextMenuTarget(invocation.context);
+			void Promise.resolve().then(() => action(invocation.context)).catch((error) => {
+				console.warn(`[desktop-context-menu] ${itemId} failed`, error);
+			});
+			return true;
+		}
+
+		function dismissContextMenuContribution(token, restoreFocus = true) {
+			const invocation = contextMenuInvocations.get(token);
+			contextMenuInvocations.delete(token);
+			if (invocation === undefined) return false;
+			if (restoreFocus) focusContextMenuTarget(invocation.context);
+			return true;
+		}
+
+		const contextMenuApi = Object.freeze({
+			version: 1,
+			icons: Object.freeze([...CONTEXT_MENU_ICONS]),
+			register(value) {
+				if (contextMenuContributions.size >= 64) throw new Error("Too many desktop context menu contributions");
+				const contribution = normalizeContextMenuContribution(value);
+				if (contextMenuContributions.has(contribution.id)) throw new Error(`Duplicate context menu contribution: ${contribution.id}`);
+				contextMenuContributions.set(contribution.id, contribution);
+				return () => contextMenuContributions.delete(contribution.id);
+			},
+			collect: collectContextMenuContributions,
+			execute: executeContextMenuContribution,
+			dismiss: dismissContextMenuContribution
+		});
+		const desktopApi = window.dshDesktop && typeof window.dshDesktop === "object" ? window.dshDesktop : {};
+		desktopApi.contextMenu = contextMenuApi;
+		window.dshDesktop = desktopApi;
+		if (typeof window.dispatchEvent === "function" && typeof CustomEvent === "function") {
+			window.dispatchEvent(new CustomEvent("dsh-desktop-context-menu-ready", { detail: contextMenuApi }));
+		}
 
 		function projectSessions(snapshot) {
 			const projected = new Map();
@@ -250,6 +428,7 @@ window.__ModuleLoader__.load({
 		exports.inject = ["slots", "sessions"];
 		exports.projectSessions = projectSessions;
 		exports.diffSessionNotifications = diffSessionNotifications;
+		exports.contextMenuApi = contextMenuApi;
 		exports.apply = function apply(ctx) {
 			let previous = projectSessions(ctx.sessions.list.getSnapshot());
 			const onSessionsChanged = () => {
@@ -270,6 +449,14 @@ window.__ModuleLoader__.load({
 			};
 			window.addEventListener("message", onDesktopMessage);
 			ctx.effect(() => () => window.removeEventListener("message", onDesktopMessage), "desktop-notifications: notification click");
+
+			const onContextMenu = (event) => { capturedContextMenu = captureContextMenu(event); };
+			window.addEventListener("contextmenu", onContextMenu, true);
+			ctx.effect(() => () => {
+				window.removeEventListener("contextmenu", onContextMenu, true);
+				capturedContextMenu = undefined;
+				contextMenuInvocations.clear();
+			}, "desktop-context-menu: capture plugin context");
 
 			ctx.slots.inject("settings.section", () => ctx.slots.register({
 				name: "settings.section",

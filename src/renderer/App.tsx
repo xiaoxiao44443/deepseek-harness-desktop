@@ -2,6 +2,8 @@ import { ChevronDown, Code2, Copy, Minus, Square, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { DesktopState, DevelopmentState, PluginRecoveryEntry, TitleMenuAction } from '../shared/contracts.js'
+import type { DesktopContextMenuRequest } from '../shared/context-menu.js'
+import { ContextMenu } from './ContextMenu.js'
 import appIconUrl from '../../app-icon.png'
 import titlebarIconUrl from '../../titlebar-icon.png'
 
@@ -189,7 +191,9 @@ export function App(): ReactNode {
   const [developmentOpen, setDevelopmentOpen] = useState(false)
   const [startupActionPending, setStartupActionPending] = useState(false)
   const [startupActionError, setStartupActionError] = useState<string>()
+  const [contextMenu, setContextMenu] = useState<DesktopContextMenuRequest>()
   const harnessFrame = useRef<HTMLIFrameElement>(null)
+  const contextMenuRef = useRef<DesktopContextMenuRequest | undefined>(undefined)
   const releaseCloseButton = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
@@ -198,6 +202,12 @@ export function App(): ReactNode {
     void desktopApi.getState().then((nextState) => { if (!disposed) setState(nextState) })
     return () => { disposed = true; unsubscribe() }
   }, [])
+
+  useEffect(() => desktopApi.onContextMenu((request) => {
+    contextMenuRef.current = request
+    setContextMenu(request)
+    setMenuOpen(false)
+  }), [])
 
   useEffect(() => {
     if (state === undefined) return
@@ -243,6 +253,37 @@ export function App(): ReactNode {
   const availableUpdate = state?.updateVersion !== undefined && state.updateVersion !== state.harnessVersion
   const patchEnabled = Boolean(state?.development.patchPath)
   const pluginFailure = state?.pluginFailure
+
+  const dismissContextMenu = useCallback((restoreFocus = true): void => {
+    const current = contextMenuRef.current
+    if (current !== undefined) void desktopApi.dismissContextMenu(current.requestId, restoreFocus)
+    contextMenuRef.current = undefined
+    setContextMenu(undefined)
+  }, [])
+
+  const selectContextMenuItem = useCallback((itemId: string): void => {
+    const current = contextMenuRef.current
+    if (current === undefined) return
+    void desktopApi.selectContextMenuItem({
+      requestId: current.requestId,
+      itemId,
+    })
+    contextMenuRef.current = undefined
+    setContextMenu(undefined)
+  }, [])
+
+  useEffect(() => {
+    contextMenuRef.current = undefined
+    setContextMenu(undefined)
+  }, [state?.harnessLoadId, state?.harnessUrl])
+
+  useEffect(() => {
+    if (contextMenu === undefined) return
+    const onWindowBlur = (): void => dismissContextMenu(false)
+    window.addEventListener('blur', onWindowBlur)
+    return () => window.removeEventListener('blur', onWindowBlur)
+  }, [contextMenu, dismissContextMenu])
+
   const runStartupAction = async (action: () => Promise<void>): Promise<void> => {
     if (startupActionPending) return
     setStartupActionPending(true)
@@ -303,6 +344,10 @@ export function App(): ReactNode {
           <footer className="menu-footer"><span>桌面端版本</span><span id="version-label">{state.appVersion}</span></footer>
         </section>
       ) : null}
+
+      {contextMenu === undefined ? null : (
+        <ContextMenu menu={contextMenu} onSelect={selectContextMenuItem} onDismiss={dismissContextMenu} />
+      )}
 
       <Modal open={releaseNotesOpen} labelledBy="release-notes-title" closeLabel="关闭版本说明" onClose={() => { setReleaseNotesOpen(false); requestAnimationFrame(focusHarness) }}>
         <header className="dialog-header">

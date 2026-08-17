@@ -366,6 +366,93 @@ body.maximized .restore-icon { display: block; }
   font-size: 12px;
 }
 
+.context-menu-backdrop {
+  position: fixed;
+  z-index: 64;
+  inset: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.context-menu-card {
+  position: fixed;
+  z-index: 65;
+  display: grid;
+  width: max-content;
+  min-width: 164px;
+  max-width: min(260px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow: auto;
+  padding: 4px;
+  color: var(--menu-text);
+  border: 1px solid var(--menu-border);
+  border-radius: 8px;
+  background: var(--menu-bg);
+  box-shadow:
+    0 20px 48px rgba(0, 0, 0, 0.32),
+    0 5px 14px rgba(0, 0, 0, 0.18),
+    inset 0 1px rgba(255, 255, 255, 0.09);
+  backdrop-filter: blur(16px) saturate(1.45);
+  -webkit-backdrop-filter: blur(16px) saturate(1.45);
+  animation: context-menu-in 110ms cubic-bezier(0.2, 0.76, 0.28, 1) both;
+  transform-origin: top left;
+}
+
+.context-menu-item {
+  display: grid;
+  min-height: 31px;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  padding: 0 8px;
+  color: var(--menu-text);
+  text-align: left;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+}
+
+.context-menu-item:hover:not(:disabled),
+.context-menu-item:focus-visible:not(:disabled) {
+  background: var(--menu-hover);
+}
+
+.context-menu-item:active:not(:disabled) { background: var(--menu-active); }
+.context-menu-item:disabled { opacity: 0.42; }
+.context-menu-item.danger:not(:disabled) { color: #ef737b; }
+
+.context-menu-icon {
+  display: grid;
+  width: 16px;
+  height: 16px;
+  place-items: center;
+  color: var(--menu-muted);
+}
+
+.context-menu-item.danger .context-menu-icon { color: currentColor; }
+.context-menu-icon svg { width: 14px; height: 14px; stroke-width: 1.7; }
+
+.context-menu-label {
+  overflow: hidden;
+  font-size: 12.5px;
+  font-weight: 450;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-menu-separator {
+  height: 1px;
+  margin: 3px 6px;
+  background: var(--menu-border);
+}
+
+@keyframes context-menu-in {
+  from { opacity: 0; transform: translateY(-2px) scale(0.975); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
 .dialog-backdrop {
   position: fixed;
   z-index: 70;
@@ -742,7 +829,8 @@ body.maximized .restore-icon { display: block; }
   .dialog-backdrop.entering,
   .dialog-backdrop.leaving,
   .app-dialog.entering,
-  .app-dialog.leaving { animation-duration: 1ms; }
+  .app-dialog.leaving,
+  .context-menu-card { animation-duration: 1ms; }
 }
 
 @keyframes spin { to { transform: rotate(360deg); } }

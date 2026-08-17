@@ -75,6 +75,34 @@ dsh plugin --profile default add ./scratch-plugin
 
 Patch 是 Harness Web 服务的启动参数，因此要通过桌面菜单应用；Plugin 和普通 dsh/pnpm 命令则可在桌面入口与 Harness 内部双向使用。
 
+### 插件右键菜单贡献
+
+桌面端的基础右键菜单由 Electron 直接从 Harness iframe 的 `context-menu` 事件生成，即使 `dsh-desktop-bridge` Client 插件未加载，撤销、剪切、复制、粘贴、全选和链接操作仍然可用。React 壳层只负责绘制菜单，Harness 页面不会获得 Electron IPC。
+
+Client 插件可以通过页面内的可选注册表追加菜单项。贡献只包含声明与留在 iframe 内执行的回调；桌面壳只接收经过限长、命名空间和图标白名单处理的菜单描述。
+
+```js
+const contextMenu = window.dshDesktop?.contextMenu
+if (contextMenu) {
+  const dispose = contextMenu.register({
+    id: 'archive-manager.archive-session',
+    label: '归档当前会话',
+    icon: 'archive',
+    group: 'session',
+    order: 100,
+    when: ({ target }) => Boolean(target.closest('[data-session-id]')),
+    enabled: ({ target }) => target.getAttribute('aria-busy') !== 'true',
+    onSelect: async ({ target }) => {
+      const sessionId = target.closest('[data-session-id]')?.dataset.sessionId
+      if (sessionId) await archiveSession(sessionId)
+    },
+  })
+  ctx.effect(() => dispose, 'archive-manager: desktop context menu')
+}
+```
+
+`label`、`enabled`、`checked`、`danger` 和 `when` 均可使用基于点击上下文的函数。上下文提供 `target`、`editableElement`、`editable`、`selectionText`、`linkUrl`、`x`、`y` 和原始 `event`。可用图标由 `window.dshDesktop.contextMenu.icons` 给出；未知图标会回退为 `plugin`。如果插件可能早于桥接 Client 加载，可监听一次 `dsh-desktop-context-menu-ready` 事件后再注册。
+
 ## 更新策略
 
 桌面端启动 15 秒后检查 npm 的 `@deepseek-ai/dsh` `latest` 标签，此后每 6 小时检查一次。下载完成后标题栏显示“已就绪”；点击可重启应用，也可以在下次正常启动时自动应用。Harness 核心更新与未来桌面壳自身更新相互独立。
