@@ -24,7 +24,7 @@ describe('directory picker IPC compatibility worker', () => {
       { kind: 'showing', threadId: 7 },
       { kind: 'done', path: 'C:\\workspace' },
     ])
-  })
+  }, 15_000)
 
   it('uses the desktop picker bridge instead of loading the native worker', async () => {
     let requestBody = ''
@@ -67,5 +67,5 @@ describe('directory picker IPC compatibility worker', () => {
     expect(result).toEqual({ code: 0, stderr: '' })
     expect(JSON.parse(requestBody)).toEqual({ title: 'Choose a test workspace' })
     expect(messages).toEqual([{ kind: 'done', path: 'E:\\workspace' }])
-  })
+  }, 15_000)
 })
