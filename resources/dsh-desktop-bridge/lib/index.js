@@ -1,4 +1,4 @@
-import { watch } from 'node:fs'
+import { unwatchFile, watchFile } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
@@ -106,19 +106,17 @@ export async function apply(ctx, overrides = {}) {
     refreshTimer.unref?.()
   }
 
-  let watcher
-  try {
-    watcher = watch(profilePath, { persistent: false }, (_event, filename) => {
-      if (filename === null || PROFILE_FILES.includes(String(filename))) refresh()
-    })
-  } catch {
-    // The profile may be created lazily in a fresh DSH_HOME. Static guidance and
-    // the restart tool remain available; the next process will retry watching.
+  // Poll the two relevant files directly instead of watching the directory.
+  // On Windows, fs.watch can abort inside libuv when the directory path and its
+  // resolved long-path form differ (for example in a temporary or 8.3 path).
+  const watchedFiles = PROFILE_FILES.map((file) => join(profilePath, file))
+  for (const file of watchedFiles) {
+    watchFile(file, { persistent: false, interval: 250 }, refresh)
   }
 
   return () => {
     clearTimeout(refreshTimer)
-    watcher?.close()
+    for (const file of watchedFiles) unwatchFile(file, refresh)
     baseline = ''
   }
 }
