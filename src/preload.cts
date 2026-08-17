@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { DesktopBridge, DesktopState, DevelopmentPluginRequest, TitleMenuAction, WindowAction } from './shared/contracts.js'
-import type { ContextMenuPointerReplay, DesktopContextMenuActionRequest, DesktopContextMenuRequest } from './shared/context-menu.js'
+import type { DesktopContextMenuActionRequest, DesktopContextMenuRequest, DesktopPointerInput } from './shared/context-menu.js'
 
 const bridge: DesktopBridge = {
   getState: () => ipcRenderer.invoke('desktop:get-state') as Promise<DesktopState>,
@@ -16,8 +16,7 @@ const bridge: DesktopBridge = {
   restoreRecoveredPlugin: (entryId: string) => ipcRenderer.invoke('desktop:plugin-recovery-restore', entryId) as Promise<void>,
   runDevelopmentPlugin: (request: DevelopmentPluginRequest) => ipcRenderer.invoke('desktop:development-run-plugin', request) as Promise<void>,
   selectContextMenuItem: (request: DesktopContextMenuActionRequest) => ipcRenderer.invoke('desktop:context-menu-select', request) as Promise<void>,
-  dismissContextMenu: (requestId: string, restoreFocus = true, replayPointer?: ContextMenuPointerReplay) => ipcRenderer.invoke('desktop:context-menu-dismiss', requestId, restoreFocus, replayPointer) as Promise<void>,
-  replayPointerInput: (replayPointer: ContextMenuPointerReplay) => ipcRenderer.invoke('desktop:replay-pointer-input', replayPointer) as Promise<void>,
+  dismissContextMenu: (requestId: string, restoreFocus = true) => ipcRenderer.invoke('desktop:context-menu-dismiss', requestId, restoreFocus) as Promise<void>,
   onState(listener: (state: DesktopState) => void) {
     const handler = (_event: Electron.IpcRendererEvent, state: DesktopState): void => listener(state)
     ipcRenderer.on('desktop:state', handler)
@@ -27,6 +26,11 @@ const bridge: DesktopBridge = {
     const handler = (_event: Electron.IpcRendererEvent, request: DesktopContextMenuRequest): void => listener(request)
     ipcRenderer.on('desktop:context-menu', handler)
     return () => ipcRenderer.off('desktop:context-menu', handler)
+  },
+  onPointerInput(listener: (input: DesktopPointerInput) => void) {
+    const handler = (_event: Electron.IpcRendererEvent, input: DesktopPointerInput): void => listener(input)
+    ipcRenderer.on('desktop:pointer-input', handler)
+    return () => ipcRenderer.off('desktop:pointer-input', handler)
   },
 }
 

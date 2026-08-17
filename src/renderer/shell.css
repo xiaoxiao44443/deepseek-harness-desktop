@@ -264,15 +264,6 @@ body.maximized .restore-icon { display: block; }
   background: var(--hover);
 }
 
-.menu-backdrop {
-  position: fixed;
-  z-index: 50;
-  inset: 42px 0 0;
-  padding: 0;
-  border: 0;
-  background: transparent;
-}
-
 .menu-card {
   position: fixed;
   z-index: 60;
@@ -364,15 +355,6 @@ body.maximized .restore-icon { display: block; }
   color: var(--menu-muted);
   border-top: 1px solid var(--menu-border);
   font-size: 12px;
-}
-
-.context-menu-backdrop {
-  position: fixed;
-  z-index: 90;
-  inset: 0;
-  padding: 0;
-  border: 0;
-  background: transparent;
 }
 
 .context-menu-card {

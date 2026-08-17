@@ -1,8 +1,8 @@
 import { ChevronDown, Code2, Copy, Minus, Square, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react'
+import type { ReactNode } from 'react'
 import type { DesktopState, DevelopmentState, PluginRecoveryEntry, TitleMenuAction } from '../shared/contracts.js'
-import type { ContextMenuPointerReplay, DesktopContextMenuRequest } from '../shared/context-menu.js'
+import type { DesktopContextMenuRequest } from '../shared/context-menu.js'
 import { ContextMenu } from './ContextMenu.js'
 import appIconUrl from '../../app-icon.png'
 import titlebarIconUrl from '../../titlebar-icon.png'
@@ -209,6 +209,18 @@ export function App(): ReactNode {
     setMenuOpen(false)
   }), [])
 
+  useEffect(() => desktopApi.onPointerInput(({ x, y }) => {
+    const target = document.elementFromPoint(x, y)
+    if (target === null || target.closest('#title-menu, #title-menu-popover') === null) setMenuOpen(false)
+
+    const current = contextMenuRef.current
+    if (current !== undefined && (target === null || target.closest('.context-menu-card') === null)) {
+      contextMenuRef.current = undefined
+      setContextMenu(undefined)
+      void desktopApi.dismissContextMenu(current.requestId, false)
+    }
+  }), [])
+
   useEffect(() => {
     if (state === undefined) return
     document.documentElement.dataset.theme = state.theme
@@ -239,12 +251,6 @@ export function App(): ReactNode {
   const focusHarness = useCallback(() => {
     if (state?.harnessUrl) harnessFrame.current?.focus({ preventScroll: true })
   }, [state?.harnessUrl])
-  const dismissMenuThroughPointer = useCallback((event: ReactPointerEvent<HTMLButtonElement>): void => {
-    event.preventDefault()
-    const button = event.button === 2 ? 'right' : event.button === 1 ? 'middle' : 'left'
-    setMenuOpen(false)
-    void desktopApi.replayPointerInput({ x: event.clientX, y: event.clientY, button })
-  }, [])
   const runMenuAction = useCallback(async (action: TitleMenuAction) => {
     setMenuOpen(false)
     await desktopApi.titleMenuAction(action)
@@ -259,11 +265,11 @@ export function App(): ReactNode {
   const patchEnabled = Boolean(state?.development.patchPath)
   const pluginFailure = state?.pluginFailure
 
-  const dismissContextMenu = useCallback((restoreFocus = true, replayPointer?: ContextMenuPointerReplay): void => {
+  const dismissContextMenu = useCallback((restoreFocus = true): void => {
     const current = contextMenuRef.current
     contextMenuRef.current = undefined
     setContextMenu(undefined)
-    if (current !== undefined) void desktopApi.dismissContextMenu(current.requestId, restoreFocus, replayPointer)
+    if (current !== undefined) void desktopApi.dismissContextMenu(current.requestId, restoreFocus)
   }, [])
 
   const selectContextMenuItem = useCallback((itemId: string): void => {
@@ -338,7 +344,6 @@ export function App(): ReactNode {
         </div>
       </header>
 
-      {menuOpen ? <button className="menu-backdrop" type="button" tabIndex={-1} aria-label="关闭应用菜单" onPointerDown={dismissMenuThroughPointer} /> : null}
       {menuOpen && state !== undefined && update !== undefined ? (
         <section id="title-menu-popover" className="menu-card" role="menu" aria-label="DeepSeek Harness 应用菜单">
           <div className="menu-list">
@@ -354,7 +359,6 @@ export function App(): ReactNode {
         <ContextMenu
           menu={contextMenu}
           onSelect={selectContextMenuItem}
-          onDismiss={(replayPointer) => dismissContextMenu(replayPointer === undefined, replayPointer)}
         />
       )}
 

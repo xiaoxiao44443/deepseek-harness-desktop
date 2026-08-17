@@ -1,4 +1,4 @@
-import type { ContextMenuPointerReplay, DesktopContextMenuActionRequest, DesktopContextMenuRequest } from './context-menu.js'
+import type { DesktopContextMenuActionRequest, DesktopContextMenuRequest, DesktopPointerInput } from './context-menu.js'
 
 export type HarnessLifecycle = 'starting' | 'ready' | 'stopped' | 'error'
 export type ColorTheme = 'dark' | 'light'
@@ -67,8 +67,8 @@ export interface DesktopBridge {
   restoreRecoveredPlugin(entryId: string): Promise<void>
   runDevelopmentPlugin(request: DevelopmentPluginRequest): Promise<void>
   selectContextMenuItem(request: DesktopContextMenuActionRequest): Promise<void>
-  dismissContextMenu(requestId: string, restoreFocus?: boolean, replayPointer?: ContextMenuPointerReplay): Promise<void>
-  replayPointerInput(replayPointer: ContextMenuPointerReplay): Promise<void>
+  dismissContextMenu(requestId: string, restoreFocus?: boolean): Promise<void>
   onState(listener: (state: DesktopState) => void): () => void
   onContextMenu(listener: (request: DesktopContextMenuRequest) => void): () => void
+  onPointerInput(listener: (input: DesktopPointerInput) => void): () => void
 }

@@ -14,7 +14,6 @@ const electronMocks = vi.hoisted(() => ({
         executeJavaScript: ReturnType<typeof vi.fn>
       }
       send: ReturnType<typeof vi.fn>
-      sendInputEvent: ReturnType<typeof vi.fn>
       copyImageAt: ReturnType<typeof vi.fn>
     }
   },
@@ -32,7 +31,6 @@ vi.mock('electron', async () => {
       executeJavaScript: vi.fn(async () => true),
     }
     send = vi.fn()
-    sendInputEvent = vi.fn()
     copyImageAt = vi.fn()
     undo = vi.fn()
     redo = vi.fn()
@@ -335,26 +333,22 @@ describe('WindowController Harness reload', () => {
         { sender: window.webContents },
         request.requestId,
         false,
-        { x: 240, y: 220, button: 'left' },
       )
     }
-    await vi.waitFor(() => expect(window.webContents.sendInputEvent).toHaveBeenCalledTimes(2))
-    expect(window.webContents.sendInputEvent.mock.calls).toEqual([
-      [{ type: 'mouseDown', x: 240, y: 220, button: 'left', clickCount: 1 }],
-      [{ type: 'mouseUp', x: 240, y: 220, button: 'left', clickCount: 1 }],
-    ])
 
-    window.webContents.sendInputEvent.mockClear()
-    const replayPointer = electronMocks.ipcHandlers.get('desktop:replay-pointer-input')
-    expect(replayPointer).toBeDefined()
-    if (replayPointer !== undefined) {
-      await replayPointer({ sender: window.webContents }, { x: 360, y: 260, button: 'left' })
-    }
-    await vi.waitFor(() => expect(window.webContents.sendInputEvent).toHaveBeenCalledTimes(2))
-    expect(window.webContents.sendInputEvent.mock.calls).toEqual([
-      [{ type: 'mouseDown', x: 360, y: 260, button: 'left', clickCount: 1 }],
-      [{ type: 'mouseUp', x: 360, y: 260, button: 'left', clickCount: 1 }],
-    ])
+    const nativePointerEvent = { preventDefault: vi.fn() }
+    window.webContents.emit('before-mouse-event', nativePointerEvent, {
+      type: 'mouseDown',
+      x: 360.4,
+      y: 260.2,
+      button: 'left',
+    })
+    expect(nativePointerEvent.preventDefault).not.toHaveBeenCalled()
+    expect(window.webContents.send).toHaveBeenCalledWith('desktop:pointer-input', {
+      x: 360,
+      y: 260,
+      button: 'left',
+    })
   })
 
   it('ignores right clicks outside desktop shell inputs', async () => {

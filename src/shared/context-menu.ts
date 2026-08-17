@@ -49,7 +49,7 @@ export interface DesktopContextMenuActionRequest {
   itemId: string
 }
 
-export interface ContextMenuPointerReplay {
+export interface DesktopPointerInput {
   x: number
   y: number
   button: 'left' | 'middle' | 'right'

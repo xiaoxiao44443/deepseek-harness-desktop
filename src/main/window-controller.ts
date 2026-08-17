@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises'
 import { app, BrowserWindow, clipboard, ipcMain, nativeTheme, shell } from 'electron'
 import type { ContextMenuParams, WebFrameMain } from 'electron'
 import type { ColorTheme, DesktopPlatform, DesktopState, DevelopmentPluginRequest, HarnessLifecycle, PluginInitializationFailure, TitleMenuAction, WindowAction } from '../shared/contracts.js'
-import type { ContextMenuPointerReplay, DesktopContextMenuActionRequest, DesktopContextMenuRequest, PluginContextMenuCollection } from '../shared/context-menu.js'
+import type { DesktopContextMenuActionRequest, DesktopContextMenuRequest, DesktopPointerInput, PluginContextMenuCollection } from '../shared/context-menu.js'
 import { parsePluginContextMenuCollection } from '../shared/context-menu.js'
 import type { HarnessRuntimeManager } from './harness-runtime.js'
 import type { DevelopmentService } from './development-service.js'
@@ -13,6 +13,7 @@ import { appendPluginContextMenuItems, BUILTIN_CONTEXT_MENU_ACTIONS, buildBuilti
 
 const STATE_CHANNEL = 'desktop:state'
 const CONTEXT_MENU_CHANNEL = 'desktop:context-menu'
+const POINTER_INPUT_CHANNEL = 'desktop:pointer-input'
 const HARNESS_LOAD_TIMEOUT_MS = 45_000
 const HARNESS_LOAD_PROBE_INTERVAL_MS = 100
 const HARNESS_LOAD_READY_FALLBACK_MS = 3_000
@@ -125,6 +126,16 @@ export class WindowController {
     window.webContents.on('before-input-event', (event, input) => {
       const key = input.key.toLowerCase()
       if (key === 'f5' || (key === 'r' && (input.control || input.meta))) event.preventDefault()
+    })
+    window.webContents.on('before-mouse-event', (_event, input) => {
+      if (input.type !== 'mouseDown') return
+      if (input.button !== 'left' && input.button !== 'middle' && input.button !== 'right') return
+      const pointer: DesktopPointerInput = {
+        x: Math.round(input.x),
+        y: Math.round(input.y),
+        button: input.button,
+      }
+      window.webContents.send(POINTER_INPUT_CHANNEL, pointer)
     })
     window.webContents.on('context-menu', (event, params) => {
       if (!this.isSupportedContextMenu(params)) return
@@ -299,14 +310,9 @@ export class WindowController {
       if (event.sender !== this.window?.webContents) return
       await this.selectContextMenuItem(request)
     })
-    ipcMain.handle('desktop:context-menu-dismiss', async (event, requestId: string, restoreFocus: boolean, replayPointer: unknown) => {
+    ipcMain.handle('desktop:context-menu-dismiss', async (event, requestId: string, restoreFocus: boolean) => {
       if (event.sender !== this.window?.webContents) return
-      await this.dismissContextMenu(requestId, restoreFocus !== false, replayPointer)
-    })
-    ipcMain.handle('desktop:replay-pointer-input', (event, replayPointer: unknown) => {
-      if (event.sender !== this.window?.webContents) return
-      const replay = this.parseContextMenuPointerReplay(replayPointer)
-      if (replay !== undefined) this.replayPointerInput(replay)
+      await this.dismissContextMenu(requestId, restoreFocus !== false)
     })
   }
 
@@ -411,38 +417,13 @@ export class WindowController {
     }
   }
 
-  private async dismissContextMenu(requestId: string, restoreFocus: boolean, replayPointer?: unknown): Promise<void> {
+  private async dismissContextMenu(requestId: string, restoreFocus: boolean): Promise<void> {
     if (typeof requestId !== 'string' || requestId.length === 0 || requestId.length > 128) return
     const pending = this.pendingContextMenu
     if (pending === undefined || pending.requestId !== requestId) return
     this.pendingContextMenu = undefined
     if (restoreFocus) await this.focusContextMenuFrame(pending.frame)
     await this.releasePluginContextMenu(pending, restoreFocus)
-    const replay = this.parseContextMenuPointerReplay(replayPointer)
-    if (replay !== undefined) this.replayPointerInput(replay)
-  }
-
-  private parseContextMenuPointerReplay(value: unknown): ContextMenuPointerReplay | undefined {
-    if (value === null || typeof value !== 'object') return undefined
-    const candidate = value as Partial<ContextMenuPointerReplay>
-    if (!Number.isFinite(candidate.x) || !Number.isFinite(candidate.y)) return undefined
-    if (candidate.button !== 'left' && candidate.button !== 'middle' && candidate.button !== 'right') return undefined
-    const x = Math.round(candidate.x as number)
-    const y = Math.round(candidate.y as number)
-    return x >= 0 && y >= 0 && x <= 100_000 && y <= 100_000
-      ? { x, y, button: candidate.button }
-      : undefined
-  }
-
-  private replayPointerInput(replay: ContextMenuPointerReplay): void {
-    setTimeout(() => {
-      const window = this.window
-      if (window === undefined || window.isDestroyed()) return
-      const [width = 0, height = 0] = window.getContentSize()
-      if (replay.x >= width || replay.y >= height) return
-      window.webContents.sendInputEvent({ type: 'mouseDown', ...replay, clickCount: 1 })
-      window.webContents.sendInputEvent({ type: 'mouseUp', ...replay, clickCount: 1 })
-    }, 16)
   }
 
   private async executeBuiltinContextMenuAction(
