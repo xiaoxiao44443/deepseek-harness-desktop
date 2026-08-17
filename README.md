@@ -6,13 +6,14 @@ DeepSeek Harness 的轻量 Electron 桌面壳。Harness 仍是完整、未修改
 
 - Electron 主进程只负责窗口、更新和 Harness 子进程，不承载 Agent 业务。
 - Harness 使用 Electron 内置 Node 24 以独立进程运行：`dsh web --port 0`。
-- 发布包把 Harness 与 npm 更新器作为单独的运行时归档分发；每个桌面壳版本首次启动时原子解包一次，后续直接复用，不依赖 `app.asar` 的依赖裁剪结果。
+- 发布包把 Harness 与 npm 更新器作为独立运行时分发，不依赖 `app.asar` 的依赖裁剪结果。桌面壳会先显示启动窗口，再准备运行时；macOS 直接从 App Resources 使用运行时，避免首次启动解压数万个文件；Windows 在窗口内提示并完成首次原子解包，后续直接复用。
 - 页面仅绑定 `127.0.0.1` 的随机端口，并嵌入沙箱化 iframe；主壳与 Harness DOM 隔离，Harness 不获得 Electron IPC。
 - 桌面壳 renderer 使用 React 19 + TypeScript + Vite，开发模式支持 HMR；Harness 页面和进程生命周期仍由 Electron 主进程独立托管。
 - 桌面端不覆盖 `DSH_HOME`：Harness 遵循官方解析顺序（显式配置、`$DSH_HOME`、`~/.dsh`）。因此外部 dsh 与桌面端自然共享配置、会话、Profile、凭据和扩展；项目工作区仍由 Harness 自己管理。
 - 桌面壳自己的 Chromium 状态、运行时、更新缓存和开发设置统一位于 `~/.saltfish/deepseek-harness-desktop`，Windows、macOS 与 Linux 使用同一目录约定。
 - Harness 核心安装在版本化目录。新版本先进入 staging，npm 完整性校验和 `dsh --version` 验证通过后才标记待更新；下次启动先试运行新版本，健康检查失败会自动回退。
 - 桌面端为每个受管 Harness 运行时生成同源的 `dsh`、`pnpm` 和 `node` 启动器，并把它们注入 Harness 进程的 `PATH`。因此标题菜单里的开发操作、Harness 自己的终端和 Agent 启动的子进程使用的是同一套版本，不会出现“壳能用、dsh 自己不能用”的分叉。
+- 桌面端通过内置 Host 插件 `@saltfish/dsh-desktop-bridge` 提供受审批的 `desktop_restart_harness` 工具，并监测当前 Web Profile 是否在进程启动后发生变化。模型可以请求由 Electron 主进程安全重启 Harness，从而加载新安装的插件；桥接层使用桌面私有 `--patch` 注入，不会改写用户共享的 `~/.dsh/profiles/web`。
 
 官方仓库提到未来 Electron 可通过 `file:// + IPC bridge` 运行，但当前发布包尚未提供可直接使用的桥接适配器。本项目把载体封装在 `HarnessProcess` 与 `WindowController` 内，后续可以替换而不影响更新器和用户数据。
 
@@ -54,13 +55,13 @@ pnpm package:mac:intel
 
 Harness 运行时包含平台相关的原生依赖，因此 `prepare:runtime` 必须在目标平台和架构上执行，Windows 生成的 `harness-runtime.tgz` 不能用于 macOS。仓库提供 `.github/workflows/build-macos-intel.yml`，可以在 GitHub Actions 的 Intel macOS Runner 上手动构建 DMG 和 ZIP。当前产物未签名，适合测试；公开分发前还需要接入 Developer ID 签名和 Apple 公证。
 
-macOS 使用原生红黄绿窗口按钮，桌面壳自己的状态仍位于 `~/.saltfish/deepseek-harness-desktop`，Harness 官方数据仍位于 `~/.dsh`。
+macOS 使用原生红黄绿窗口按钮，并直接从 App Resources 启动随包运行时，不需要在首次启动时解压。桌面壳自己的状态仍位于 `~/.saltfish/deepseek-harness-desktop`，Harness 官方数据仍位于 `~/.dsh`。
 
 ## Harness 开发能力
 
 标题栏菜单中的“开发工具”提供官方开发流程的桌面入口：
 
-- **Patch 配置**：选择 `yml`、`yaml` 或 `json`，重启后等价于 `dsh web --patch <配置文件>`。路径会保存，下次启动继续使用；清除后恢复普通启动。
+- **Patch 配置**：选择 `yml`、`yaml` 或 `json`，重启后等价于额外添加一个 `dsh web --patch <配置文件>`。路径会保存，下次启动继续使用；未选择文件时按钮只执行普通 Harness 重启。
 - **Plugin 命令**：填写 Profile 和 pnpm 参数，等价于 `dsh plugin --profile <名称> <参数...>`。参数会先解析为参数数组，不经系统 Shell 拼接。
 - **创造模式**：继续使用 Harness 内置预设，桌面端不复制或修改 Harness 界面。
 

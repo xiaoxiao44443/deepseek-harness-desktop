@@ -18,13 +18,13 @@ if (endpoint === undefined || endpoint === '') {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   require(originalWorker)
 } else {
-  const title = process.env.DSH_DIALOG_TITLE ?? 'Select Workspace Directory'
+  const title = process.env.DSH_DIALOG_TITLE?.trim()
   void (async () => {
     try {
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ title }),
+        body: JSON.stringify(title === undefined || title === '' ? {} : { title }),
       })
       const payload = await response.json() as { path?: unknown, error?: unknown }
       if (!response.ok) throw new Error(typeof payload.error === 'string' ? payload.error : `HTTP ${response.status}`)

@@ -1,7 +1,8 @@
 import { createServer, type Server } from 'node:http'
 import { randomBytes } from 'node:crypto'
 import { readFile, stat, writeFile } from 'node:fs/promises'
-import { dialog, type BrowserWindow, type OpenDialogOptions } from 'electron'
+import { app, dialog, type BrowserWindow, type OpenDialogOptions } from 'electron'
+import { workspaceDirectoryDialogTitle } from './system-language.js'
 
 const MAX_REQUEST_BYTES = 16 * 1024
 
@@ -73,9 +74,13 @@ export class DirectoryPickerBridge {
         chunks.push(buffer)
       }
       const payload = JSON.parse(Buffer.concat(chunks).toString('utf8')) as PickerRequest
-      const title = typeof payload.title === 'string' && payload.title.trim() !== ''
-        ? payload.title
-        : 'Select Workspace Directory'
+      const requestedTitle = typeof payload.title === 'string'
+        ? payload.title.trim()
+        : ''
+      const systemLanguage = app.getPreferredSystemLanguages()[0] ?? app.getLocale()
+      const title = requestedTitle !== ''
+        ? requestedTitle
+        : workspaceDirectoryDialogTitle(systemLanguage)
       const options: OpenDialogOptions = {
         title,
         properties: ['openDirectory', 'createDirectory'],

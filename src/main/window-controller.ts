@@ -126,6 +126,19 @@ export class WindowController {
     this.publishState()
   }
 
+  setRuntimePreparing(): void {
+    this.stopThemeSync()
+    this.cancelPendingHarnessLoad(new Error('Harness 运行时正在准备。'))
+    this.harnessVersion = undefined
+    this.harnessUrl = undefined
+    this.harnessOrigin = undefined
+    this.harnessLifecycle = 'starting'
+    this.harnessMessage = app.isPackaged && process.platform === 'win32'
+      ? '首次启动正在解压 Harness 运行时，请稍候…'
+      : '正在准备本地 Harness 运行时…'
+    this.publishState()
+  }
+
   setHarnessStarting(version: string): void {
     this.stopThemeSync()
     this.cancelPendingHarnessLoad(new Error('Harness 启动目标已变更。'))

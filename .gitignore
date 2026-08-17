@@ -4,6 +4,8 @@ release/
 build/harness-runtime/
 build/harness-runtime.tgz
 build/npm-cache/
+build/app-icon.icns
+build/app-icon.iconset/
 *.log
 
 coverage/
