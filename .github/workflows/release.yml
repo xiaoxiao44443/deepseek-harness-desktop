@@ -1,0 +1,60 @@
+name: Release desktop
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-x64:
+    uses: ./.github/workflows/build-windows.yml
+
+  build-macos-intel:
+    uses: ./.github/workflows/build-macos-intel.yml
+
+  publish-release:
+    name: Publish GitHub release
+    needs:
+      - build-windows-x64
+      - build-macos-intel
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download packaged applications
+        uses: actions/download-artifact@v8
+        with:
+          pattern: deepseek-harness-desktop-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate SHA-256 checksums
+        shell: bash
+        run: |
+          cd release-assets
+          sha256sum * > SHA256SUMS.txt
+
+      - name: Create or update GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            prerelease+=(--prerelease)
+          fi
+
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" release-assets/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" release-assets/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --generate-notes \
+              --title "DeepSeek Harness Desktop ${GITHUB_REF_NAME#v}" \
+              "${prerelease[@]}"
+          fi
