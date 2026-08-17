@@ -294,7 +294,7 @@ export class WindowController {
 
   private publishState(): void {
     const window = this.window
-    if (window === undefined || window.isDestroyed() || window.webContents.isLoading()) return
+    if (window === undefined || window.isDestroyed() || window.webContents.isLoadingMainFrame()) return
     window.webContents.send(STATE_CHANNEL, this.getState())
   }
 

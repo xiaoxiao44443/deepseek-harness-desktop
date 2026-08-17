@@ -18,7 +18,10 @@ vi.mock('electron', async () => {
     send = vi.fn()
     setWindowOpenHandler = vi.fn()
     closeDevTools = vi.fn()
-    isLoading(): boolean { return false }
+    // A Harness subframe can still report loading after the desktop shell is
+    // ready. State publication must only be gated on the main frame.
+    isLoading(): boolean { return true }
+    isLoadingMainFrame(): boolean { return false }
   }
 
   class MockBrowserWindow extends MockEventEmitter {
