@@ -9,6 +9,8 @@ import type { DevelopmentService } from './development-service.js'
 
 const STATE_CHANNEL = 'desktop:state'
 const HARNESS_LOAD_TIMEOUT_MS = 45_000
+const HARNESS_LOAD_PROBE_INTERVAL_MS = 100
+const HARNESS_LOAD_READY_FALLBACK_MS = 3_000
 const HARNESS_CHANGES_URL = 'https://github.com/deepseek-ai/deepseek-harness/commits/master/'
 
 interface PendingHarnessLoad {
@@ -16,6 +18,7 @@ interface PendingHarnessLoad {
   resolve: () => void
   reject: (error: Error) => void
   timer: NodeJS.Timeout
+  readyFallback: NodeJS.Timeout
 }
 
 export class WindowController {
@@ -27,6 +30,8 @@ export class WindowController {
   private harnessLoadId = 0
   private harnessOrigin: string | undefined
   private pendingHarnessLoad: PendingHarnessLoad | undefined
+  private harnessLoadProbeTimer: NodeJS.Timeout | undefined
+  private harnessLoadProbeInFlight = false
   private ipcRegistered = false
   private theme: ColorTheme = nativeTheme.shouldUseDarkColors ? 'dark' : 'light'
   private themeProbeTimer: NodeJS.Timeout | undefined
@@ -104,6 +109,11 @@ export class WindowController {
     window.webContents.on('did-frame-navigate', (_event, url, _code, _status, isMainFrame) => {
       if (!isMainFrame && this.safeOrigin(url) === this.harnessOrigin) this.handleHarnessFrameLoaded(url)
     })
+    window.webContents.on('did-frame-finish-load', (_event, isMainFrame) => {
+      if (isMainFrame) return
+      const frame = this.findHarnessFrame()
+      if (frame !== undefined) this.handleHarnessFrameLoaded(frame.url)
+    })
     window.webContents.on('did-fail-load', (_event, code, description, validatedUrl, isMainFrame) => {
       if (isMainFrame || code === -3 || this.safeOrigin(validatedUrl) !== this.harnessOrigin) return
       this.setHarnessError(`页面加载失败：${description} (${code}) ${validatedUrl}`)
@@ -163,13 +173,17 @@ export class WindowController {
     const loadPromise = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         if (this.pendingHarnessLoad?.url !== url) return
+        clearTimeout(this.pendingHarnessLoad.readyFallback)
         this.pendingHarnessLoad = undefined
+        this.stopHarnessLoadProbe()
         reject(new Error(`Harness 页面在 ${HARNESS_LOAD_TIMEOUT_MS / 1000} 秒内没有完成加载。`))
       }, HARNESS_LOAD_TIMEOUT_MS)
-      this.pendingHarnessLoad = { url, resolve, reject, timer }
+      const readyFallback = setTimeout(() => this.handleHarnessFrameLoaded(url), HARNESS_LOAD_READY_FALLBACK_MS)
+      this.pendingHarnessLoad = { url, resolve, reject, timer, readyFallback }
     })
 
     this.publishState()
+    void this.probeHarnessFrameReady(url)
     await loadPromise
   }
 
@@ -234,7 +248,9 @@ export class WindowController {
     const pending = this.pendingHarnessLoad
     if (pending === undefined || pending.url !== this.harnessUrl) return
     clearTimeout(pending.timer)
+    clearTimeout(pending.readyFallback)
     this.pendingHarnessLoad = undefined
+    this.stopHarnessLoadProbe()
     this.harnessLifecycle = 'ready'
     this.harnessMessage = undefined
     this.startThemeSync()
@@ -293,6 +309,48 @@ export class WindowController {
       if (frame.parent === null || frame.isDestroyed()) return false
       return frame.name === 'harness-frame' || this.safeOrigin(frame.url) === this.harnessOrigin
     })
+  }
+
+  private async probeHarnessFrameReady(url: string): Promise<void> {
+    if (this.pendingHarnessLoad?.url !== url) return
+    if (this.harnessLoadProbeInFlight) {
+      this.scheduleHarnessLoadProbe(url)
+      return
+    }
+    this.harnessLoadProbeInFlight = true
+    try {
+      const frame = this.findHarnessFrame()
+      if (frame !== undefined && this.safeOrigin(frame.url) === this.harnessOrigin) {
+        const readyState = await Promise.race([
+          frame.executeJavaScript('document.readyState'),
+          new Promise<undefined>((resolve) => setTimeout(resolve, 1_000)),
+        ])
+        if (readyState === 'interactive' || readyState === 'complete') {
+          this.handleHarnessFrameLoaded(frame.url)
+          return
+        }
+      }
+    } catch {
+      // The iframe may be replaced while Harness restarts; retry against the
+      // newly attached frame until the normal page-load timeout expires.
+    } finally {
+      this.harnessLoadProbeInFlight = false
+    }
+    if (this.pendingHarnessLoad?.url !== url) return
+    this.scheduleHarnessLoadProbe(url)
+  }
+
+  private scheduleHarnessLoadProbe(url: string): void {
+    if (this.harnessLoadProbeTimer !== undefined) clearTimeout(this.harnessLoadProbeTimer)
+    this.harnessLoadProbeTimer = setTimeout(() => {
+      this.harnessLoadProbeTimer = undefined
+      void this.probeHarnessFrameReady(url)
+    }, HARNESS_LOAD_PROBE_INTERVAL_MS)
+  }
+
+  private stopHarnessLoadProbe(): void {
+    if (this.harnessLoadProbeTimer !== undefined) clearTimeout(this.harnessLoadProbeTimer)
+    this.harnessLoadProbeTimer = undefined
   }
 
   private startThemeSync(): void {
@@ -365,9 +423,11 @@ export class WindowController {
   }
 
   private cancelPendingHarnessLoad(error: Error): void {
+    this.stopHarnessLoadProbe()
     const pending = this.pendingHarnessLoad
     if (pending === undefined) return
     clearTimeout(pending.timer)
+    clearTimeout(pending.readyFallback)
     this.pendingHarnessLoad = undefined
     pending.reject(error)
   }

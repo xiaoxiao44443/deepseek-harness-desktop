@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest'
 const electronMocks = vi.hoisted(() => ({
   window: undefined as undefined | {
     webContents: EventEmitter & {
+      mainFrame: { framesInSubtree: unknown[] }
       send: ReturnType<typeof vi.fn>
     }
   },
@@ -90,5 +91,81 @@ describe('WindowController Harness reload', () => {
 
     const readyState = window?.webContents.send.mock.calls.at(-1)?.[1]
     expect(readyState).toMatchObject({ harnessLoadId: 2, harnessLifecycle: 'ready' })
+  })
+
+  it('detects a ready Harness frame even when renderer load events are missed', async () => {
+    const runtime = Object.assign(new EventEmitter(), {
+      harnessHome: '/path/that/does/not/exist',
+      updateState: { status: 'idle' },
+      checkForUpdates: vi.fn(),
+    })
+    const development = Object.assign(new EventEmitter(), {
+      state: {
+        pnpmVersion: '11.19.0',
+        restarting: false,
+        commandRunning: false,
+      },
+      choosePatch: vi.fn(),
+      clearPatch: vi.fn(),
+      restartHarness: vi.fn(),
+      runPlugin: vi.fn(),
+    })
+    const controller = new WindowController(runtime as never, development as never)
+    await controller.create()
+
+    const url = 'http://127.0.0.1:43211'
+    const frame = {
+      parent: {},
+      name: 'harness-frame',
+      url,
+      isDestroyed: () => false,
+      executeJavaScript: vi.fn().mockResolvedValue('complete'),
+    }
+    const window = electronMocks.window
+    expect(window).toBeDefined()
+    if (window !== undefined) window.webContents.mainFrame.framesInSubtree = [frame]
+
+    await controller.showHarness(url, '0.1.0')
+
+    expect(frame.executeJavaScript).toHaveBeenCalledWith('document.readyState')
+    expect(window?.webContents.send.mock.calls.at(-1)?.[1]).toMatchObject({
+      harnessLoadId: 1,
+      harnessLifecycle: 'ready',
+    })
+  })
+
+  it('reveals a healthy Harness after a grace period when Electron reports no frame events', async () => {
+    const runtime = Object.assign(new EventEmitter(), {
+      harnessHome: '/path/that/does/not/exist',
+      updateState: { status: 'idle' },
+      checkForUpdates: vi.fn(),
+    })
+    const development = Object.assign(new EventEmitter(), {
+      state: {
+        pnpmVersion: '11.19.0',
+        restarting: false,
+        commandRunning: false,
+      },
+      choosePatch: vi.fn(),
+      clearPatch: vi.fn(),
+      restartHarness: vi.fn(),
+      runPlugin: vi.fn(),
+    })
+    const controller = new WindowController(runtime as never, development as never)
+    await controller.create()
+
+    vi.useFakeTimers()
+    try {
+      const load = controller.showHarness('http://127.0.0.1:43212', '0.1.0')
+      await vi.advanceTimersByTimeAsync(3_000)
+      await load
+
+      expect(electronMocks.window?.webContents.send.mock.calls.at(-1)?.[1]).toMatchObject({
+        harnessLoadId: 1,
+        harnessLifecycle: 'ready',
+      })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
