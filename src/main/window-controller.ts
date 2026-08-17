@@ -24,6 +24,7 @@ export class WindowController {
   private harnessMessage: string | undefined
   private harnessVersion: string | undefined
   private harnessUrl: string | undefined
+  private harnessLoadId = 0
   private harnessOrigin: string | undefined
   private pendingHarnessLoad: PendingHarnessLoad | undefined
   private ipcRegistered = false
@@ -101,7 +102,7 @@ export class WindowController {
       }
     })
     window.webContents.on('did-frame-navigate', (_event, url, _code, _status, isMainFrame) => {
-      if (!isMainFrame && this.safeOrigin(url) === this.harnessOrigin) this.publishState()
+      if (!isMainFrame && this.safeOrigin(url) === this.harnessOrigin) this.handleHarnessFrameLoaded(url)
     })
     window.webContents.on('did-fail-load', (_event, code, description, validatedUrl, isMainFrame) => {
       if (isMainFrame || code === -3 || this.safeOrigin(validatedUrl) !== this.harnessOrigin) return
@@ -154,6 +155,7 @@ export class WindowController {
     this.cancelPendingHarnessLoad(new Error('Harness 页面加载目标已变更。'))
     this.harnessVersion = version
     this.harnessUrl = url
+    this.harnessLoadId += 1
     this.harnessOrigin = new URL(url).origin
     this.harnessLifecycle = 'starting'
     this.harnessMessage = '正在加载 Harness 界面…'
@@ -263,6 +265,7 @@ export class WindowController {
       theme: this.theme,
       ...(this.harnessVersion !== undefined ? { harnessVersion: this.harnessVersion } : {}),
       ...(this.harnessUrl !== undefined ? { harnessUrl: this.harnessUrl } : {}),
+      harnessLoadId: this.harnessLoadId,
       harnessLifecycle: this.harnessLifecycle,
       ...(this.harnessMessage !== undefined ? { harnessMessage: this.harnessMessage } : {}),
       updateStatus: update.status,

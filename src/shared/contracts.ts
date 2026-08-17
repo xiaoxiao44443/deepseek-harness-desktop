@@ -26,6 +26,7 @@ export interface DesktopState {
   theme: ColorTheme
   harnessVersion?: string
   harnessUrl?: string
+  harnessLoadId: number
   harnessLifecycle: HarnessLifecycle
   harnessMessage?: string
   updateStatus: HarnessUpdateStatus

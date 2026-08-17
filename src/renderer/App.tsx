@@ -222,7 +222,7 @@ export function App(): ReactNode {
   return (
     <>
       <main className="content">
-        {harnessUrl ? <iframe ref={harnessFrame} id="harness-frame" name="harness-frame" className="harness-frame" title="DeepSeek Harness" allow="clipboard-read; clipboard-write" src={harnessUrl} onLoad={() => void desktopApi.reportHarnessFrameLoaded(harnessUrl)} /> : null}
+        {harnessUrl ? <iframe key={state?.harnessLoadId} ref={harnessFrame} id="harness-frame" name="harness-frame" className="harness-frame" title="DeepSeek Harness" allow="clipboard-read; clipboard-write" src={harnessUrl} onLoad={() => void desktopApi.reportHarnessFrameLoaded(harnessUrl)} /> : null}
         {!ready ? (
           <section className={`startup ${state?.harnessLifecycle === 'error' ? 'error' : ''}`}>
             <div className="loader" aria-hidden="true" />
