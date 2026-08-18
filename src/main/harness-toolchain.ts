@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import type { HarnessRuntimeCandidate } from './harness-runtime.js'
 
 const HARNESS_BOOTSTRAP = fileURLToPath(new URL('../harness-bootstrap.cjs', import.meta.url))
+const PNPM_DESKTOP_CONFIG = '--config.minimum-release-age=0'
 
 export interface HarnessToolchain {
   binPath: string
@@ -89,7 +90,11 @@ export class HarnessToolchainManager {
           `${nodeMode}@${cmdQuoted(this.electronExecutable)} --expose-internals ${cmdQuoted(HARNESS_BOOTSTRAP)} ${cmdQuoted(candidate.entryPath)} %*\r\n`,
           'utf8',
         ),
-        writeFile(pnpmCommand, `${nodeMode}@${cmdQuoted(this.electronExecutable)} ${cmdQuoted(pnpmEntry)} %*\r\n`, 'utf8'),
+        writeFile(
+          pnpmCommand,
+          `${nodeMode}@${cmdQuoted(this.electronExecutable)} ${cmdQuoted(pnpmEntry)} ${PNPM_DESKTOP_CONFIG} %*\r\n`,
+          'utf8',
+        ),
         writeFile(nodeCommand, `${nodeMode}@${cmdQuoted(this.electronExecutable)} %*\r\n`, 'utf8'),
       ])
     } else {
@@ -100,7 +105,11 @@ export class HarnessToolchainManager {
           `${nodeMode}exec ${shellQuoted(this.electronExecutable)} --expose-internals ${shellQuoted(HARNESS_BOOTSTRAP)} ${shellQuoted(candidate.entryPath)} "$@"\n`,
           'utf8',
         ),
-        writeFile(pnpmCommand, `${nodeMode}exec ${shellQuoted(this.electronExecutable)} ${shellQuoted(pnpmEntry)} "$@"\n`, 'utf8'),
+        writeFile(
+          pnpmCommand,
+          `${nodeMode}exec ${shellQuoted(this.electronExecutable)} ${shellQuoted(pnpmEntry)} ${PNPM_DESKTOP_CONFIG} "$@"\n`,
+          'utf8',
+        ),
         writeFile(nodeCommand, `${nodeMode}exec ${shellQuoted(this.electronExecutable)} "$@"\n`, 'utf8'),
       ])
       await Promise.all([

@@ -48,6 +48,7 @@ describe('HarnessToolchainManager', () => {
     expect(dsh).toContain(entryPath)
     expect(dsh).toContain('harness-bootstrap.cjs')
     expect(pnpm).toContain(pnpmEntry)
+    expect(pnpm).toContain('--config.minimum-release-age=0')
     expect(node).toContain('electron.exe')
     expect(dsh).toContain('ELECTRON_RUN_AS_NODE=1')
   })
@@ -85,6 +86,7 @@ describe('HarnessToolchainManager', () => {
     expect(dsh).toContain("'/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness'")
     expect(dsh).toContain('"$@"')
     expect(pnpm).toContain(pnpmEntry)
+    expect(pnpm).toContain('--config.minimum-release-age=0')
     expect(node).toContain('ELECTRON_RUN_AS_NODE=1')
   })
 
