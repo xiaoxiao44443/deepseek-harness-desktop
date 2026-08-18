@@ -23,6 +23,7 @@
     "test:watch": "vitest --config vitest.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
     "package:win": "pnpm run build && pnpm run prepare:runtime && electron-builder --win nsis --publish never",
+    "package:mac:local": "pnpm run build && pnpm run prepare:runtime && pnpm run prepare:mac-icon && electron-builder --mac --x64 --dir --publish never",
     "package:mac:intel": "pnpm run build && pnpm run prepare:runtime && pnpm run prepare:mac-icon && electron-builder --mac dmg zip --x64 --publish never"
   },
   "dependencies": {

@@ -151,6 +151,107 @@ describe('desktop notification session transitions', () => {
     }])
   })
 
+  it('extracts the latest finalized assistant text for a completion preview', async () => {
+    const client = await loadClientModule()
+    const latestReply = client.latestAssistantReply as (binding: unknown) => string | undefined
+    const binding = {
+      session: {
+        getSnapshot: () => ({
+          nodes: [
+            { kind: 'assistant', blocks: [{ kind: 'text', text: '较早的回复' }] },
+            { kind: 'assistant', blocks: [{ kind: 'reasoning', text: '内部思考' }, { kind: 'text', text: '  你的图片已可查看  ' }] },
+          ],
+        }),
+      },
+    }
+
+    expect(latestReply(binding)).toBe('你的图片已可查看')
+    expect(latestReply({
+      session: {
+        getSnapshot: () => ({
+          nodes: [
+            { kind: 'assistant', blocks: [{ kind: 'text', text: '上一轮回复' }] },
+            { kind: 'assistant', blocks: [{ kind: 'image', attachment: {} }] },
+          ],
+        }),
+      },
+    })).toBeUndefined()
+    expect(latestReply(undefined)).toBeUndefined()
+  })
+
+  it('waits for the finalized assistant message after the list reports completion', async () => {
+    const client = await loadClientModule()
+    const markerOf = client.latestAssistantMarker as (binding: unknown) => unknown
+    const waitForReply = client.waitForAssistantReply as (
+      binding: unknown,
+      baseline: unknown,
+      timeoutMs?: number,
+    ) => Promise<string | undefined>
+    let snapshot = {
+      nodes: [{ kind: 'assistant', seq: 1, blocks: [{ kind: 'text', text: '上一轮回复' }] }],
+    }
+    const listeners = new Set<() => void>()
+    const binding = {
+      session: {
+        getSnapshot: () => snapshot,
+        subscribe: (listener: () => void) => {
+          listeners.add(listener)
+          return () => listeners.delete(listener)
+        },
+      },
+    }
+    const baseline = markerOf(binding)
+    const pending = waitForReply(binding, baseline, 100)
+    snapshot = {
+      nodes: [
+        ...snapshot.nodes,
+        { kind: 'assistant', seq: 2, blocks: [{ kind: 'text', text: '这一轮的最终回复' }] },
+      ],
+    }
+    for (const listener of listeners) listener()
+
+    await expect(pending).resolves.toBe('这一轮的最终回复')
+    expect(listeners.size).toBe(0)
+  })
+
+  it('extracts safe summaries from approval, question, and plan-review waits', async () => {
+    const client = await loadClientModule()
+    const summarize = client.pendingInteractionSummary as (
+      binding: unknown,
+      status: 'approval' | 'question' | 'plan-review',
+    ) => string | undefined
+    const binding = {
+      session: {
+        getSnapshot: () => ({
+          pending: [
+            { kind: 'approval', payload: { toolName: 'Bash', callId: 'private-call-id', reason: '运行项目测试' } },
+            { kind: 'question', payload: { questions: [{
+              id: 'q1',
+              header: '输出尺寸',
+              question: '你希望生成哪种尺寸？',
+            }] } },
+          ],
+        }),
+      },
+    }
+    const planBinding = {
+      session: {
+        getSnapshot: () => ({
+          pending: [{ kind: 'question', payload: { questions: [{
+            id: 'plan',
+            question: '请审核实施计划',
+            detail: '# 内部详细计划',
+            intent: { kind: 'plan-review', approve: '批准' },
+          }] } }],
+        }),
+      },
+    }
+
+    expect(summarize(binding, 'approval')).toBe('Bash：运行项目测试')
+    expect(summarize(binding, 'question')).toBe('输出尺寸：你希望生成哪种尺寸？')
+    expect(summarize(planBinding, 'plan-review')).toBe('请审核实施计划')
+  })
+
   it('prioritizes approval, question, and plan-review interactions', async () => {
     const client = await loadClientModule()
     const project = client.projectSessions as (value: unknown) => Map<string, unknown>
@@ -168,7 +269,7 @@ describe('desktop notification session transitions', () => {
       question: { displayTitle: 'Q', running: true, pendingInteraction: 'question', updatedAt: 2 },
       plan: { displayTitle: 'P', running: true, pendingInteraction: 'plan-review', updatedAt: 2 },
     } })
-    expect(diff(previous, next).map((event) => event.kind)).toEqual(['approval', 'question', 'question'])
+    expect(diff(previous, next).map((event) => event.kind)).toEqual(['approval', 'question', 'plan-review'])
   })
 
   it('reports an interaction that first appears with a newly created session', async () => {

@@ -60,4 +60,8 @@ declare module '@deepseek-ai/cordis' {
 
 export declare const name = 'desktop-notifications'
 export declare const inject: readonly ['slots', 'sessions', 'cordisInspect']
+export declare function latestAssistantReply(binding: unknown): string | undefined
+export declare function latestAssistantMarker(binding: unknown): unknown
+export declare function waitForAssistantReply(binding: unknown, baseline: unknown, timeoutMs?: number): Promise<string | undefined>
+export declare function pendingInteractionSummary(binding: unknown, status: 'approval' | 'question' | 'plan-review'): string | undefined
 export declare function apply(ctx: Context): void

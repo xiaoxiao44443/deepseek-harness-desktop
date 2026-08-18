@@ -293,7 +293,8 @@ window.__ModuleLoader__.load({
 					&& current.pendingInteraction !== prior?.pendingInteraction;
 				let kind;
 				if (interactionChanged && current.pendingInteraction === "approval") kind = "approval";
-				else if (interactionChanged && (current.pendingInteraction === "question" || current.pendingInteraction === "plan-review")) kind = "question";
+				else if (interactionChanged && current.pendingInteraction === "question") kind = "question";
+				else if (interactionChanged && current.pendingInteraction === "plan-review") kind = "plan-review";
 				else if (prior?.running && !current.running && current.pendingInteraction === undefined) kind = "turn-complete";
 				if (kind !== undefined) notifications.push({
 					kind,
@@ -303,6 +304,101 @@ window.__ModuleLoader__.load({
 				});
 			}
 			return notifications;
+		}
+
+		function latestAssistantMessage(binding) {
+			let nodes;
+			try { nodes = binding?.session?.getSnapshot?.()?.nodes; } catch { return void 0; }
+			if (!Array.isArray(nodes)) return void 0;
+			for (let index = nodes.length - 1; index >= 0; index -= 1) {
+				const node = nodes[index];
+				if (node === null || typeof node !== "object" || node.kind !== "assistant" || !Array.isArray(node.blocks)) continue;
+				const text = node.blocks
+					.filter((block) => block !== null && typeof block === "object" && block.kind === "text" && typeof block.text === "string")
+					.map((block) => block.text.trim())
+					.filter(Boolean)
+					.join("\n\n")
+					.trim();
+				const marker = node.messageId ?? node.seq
+					?? `${String(node.turn ?? "")}:${String(node.step ?? "")}:${String(node.time ?? "")}`;
+				return { marker, text: text.length > 0 ? text.slice(0, 4e3) : void 0 };
+			}
+			return void 0;
+		}
+
+		function latestAssistantReply(binding) {
+			return latestAssistantMessage(binding)?.text;
+		}
+
+		function latestAssistantMarker(binding) {
+			return latestAssistantMessage(binding)?.marker;
+		}
+
+		function waitForSessionValue(binding, read, timeoutMs = 1e3) {
+			const immediate = read();
+			if (immediate !== void 0) return Promise.resolve(immediate);
+			const session = binding?.session;
+			if (session === void 0 || typeof session.subscribe !== "function") return Promise.resolve(void 0);
+			return new Promise((resolve) => {
+				let settled = false;
+				let unsubscribe = () => {};
+				const finish = (value) => {
+					if (settled) return;
+					settled = true;
+					clearTimeout(timer);
+					unsubscribe();
+					resolve(value);
+				};
+				const check = () => {
+					const value = read();
+					if (value !== void 0) finish(value);
+				};
+				const timer = setTimeout(() => finish(void 0), timeoutMs);
+				unsubscribe = session.subscribe(check);
+				queueMicrotask(check);
+			});
+		}
+
+		function waitForAssistantReply(binding, baseline, timeoutMs) {
+			return waitForSessionValue(binding, () => {
+				const current = latestAssistantMessage(binding);
+				if (current === void 0 || current.marker === baseline) return void 0;
+				return current.text;
+			}, timeoutMs);
+		}
+
+		function pendingInteractionSummary(binding, status) {
+			let pending;
+			try { pending = binding?.session?.getSnapshot?.()?.pending; } catch { return void 0; }
+			if (!Array.isArray(pending)) return void 0;
+			if (status === "approval") {
+				const wait = [...pending].reverse().find((item) => item?.kind === "approval");
+				if (wait === void 0 || wait.payload === null || typeof wait.payload !== "object") return void 0;
+				const reason = typeof wait.payload.reason === "string" ? wait.payload.reason.trim() : "";
+				const toolName = typeof wait.payload.toolName === "string" ? wait.payload.toolName.trim() : "";
+				if (reason.length > 0 && toolName.length > 0) return `${toolName}：${reason}`.slice(0, 4e3);
+				if (reason.length > 0) return reason.slice(0, 4e3);
+				if (toolName.length > 0) return `请求使用 ${toolName}`;
+				return void 0;
+			}
+			const wait = [...pending].reverse().find((item) => item?.kind === "question");
+			const questions = wait?.payload?.questions;
+			if (!Array.isArray(questions) || questions.length === 0) return void 0;
+			const question = status === "plan-review"
+				? questions.find((item) => item?.intent?.kind === "plan-review") ?? questions[0]
+				: questions[0];
+			if (question === null || typeof question !== "object") return void 0;
+			const questionText = typeof question.question === "string" ? question.question.trim() : "";
+			const header = typeof question.header === "string" ? question.header.trim() : "";
+			const detail = typeof question.detail === "string" ? question.detail.trim() : "";
+			if (status !== "plan-review" && questionText.length > 0 && header.length > 0
+				&& !questionText.includes(header)) return `${header}：${questionText}`.slice(0, 4e3);
+			const summary = [questionText, header, detail].find((value) => value.length > 0);
+			return summary?.slice(0, 4e3);
+		}
+
+		function waitForPendingInteractionSummary(binding, status, timeoutMs) {
+			return waitForSessionValue(binding, () => pendingInteractionSummary(binding, status), timeoutMs);
 		}
 
 		async function postNotification(notification) {
@@ -511,6 +607,10 @@ window.__ModuleLoader__.load({
 		exports.inject = ["slots", "sessions", "cordisInspect"];
 		exports.projectSessions = projectSessions;
 		exports.diffSessionNotifications = diffSessionNotifications;
+		exports.latestAssistantReply = latestAssistantReply;
+		exports.latestAssistantMarker = latestAssistantMarker;
+		exports.waitForAssistantReply = waitForAssistantReply;
+		exports.pendingInteractionSummary = pendingInteractionSummary;
 		exports.DesktopContextMenuService = DesktopContextMenuService;
 		exports.createDesktopContextMenuInspectProvider = createDesktopContextMenuInspectProvider;
 		exports.apply = function apply(ctx) {
@@ -522,11 +622,31 @@ window.__ModuleLoader__.load({
 			);
 
 			let previous = projectSessions(ctx.sessions.list.getSnapshot());
+			const runBaselines = new Map();
+			for (const [id, session] of previous) {
+				if (session.running) runBaselines.set(id, latestAssistantMarker(ctx.sessions.binding(id)));
+			}
 			const onSessionsChanged = () => {
 				const next = projectSessions(ctx.sessions.list.getSnapshot());
+				for (const [id, session] of next) {
+					if (session.running && !previous.get(id)?.running) {
+						runBaselines.set(id, latestAssistantMarker(ctx.sessions.binding(id)));
+					}
+				}
 				const notifications = diffSessionNotifications(previous, next);
 				previous = next;
-				for (const notification of notifications) void postNotification(notification);
+				for (const notification of notifications) {
+					const binding = ctx.sessions.binding(notification.sessionId);
+					const baseline = runBaselines.get(notification.sessionId);
+					if (notification.kind === "turn-complete") runBaselines.delete(notification.sessionId);
+					void (async () => {
+						const summary = notification.kind === "turn-complete"
+							? await waitForAssistantReply(binding, baseline)
+							: await waitForPendingInteractionSummary(binding, notification.kind);
+						if (summary !== void 0) notification.summary = summary;
+						await postNotification(notification);
+					})();
+				}
 			};
 			const unsubscribe = ctx.sessions.list.subscribe(onSessionsChanged);
 			ctx.effect(() => unsubscribe, "desktop-notifications: session transitions");

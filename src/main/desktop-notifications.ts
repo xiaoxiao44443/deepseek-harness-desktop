@@ -4,7 +4,7 @@ import { Notification } from 'electron'
 import type { BrowserWindow } from 'electron'
 
 export type TurnCompletionNotificationMode = 'never' | 'unfocused' | 'always'
-export type DesktopNotificationKind = 'turn-complete' | 'approval' | 'question'
+export type DesktopNotificationKind = 'turn-complete' | 'approval' | 'question' | 'plan-review'
 
 export interface DesktopNotificationSettings {
   turnCompletion: TurnCompletionNotificationMode
@@ -16,6 +16,7 @@ export interface DesktopNotificationRequest {
   kind: DesktopNotificationKind
   sessionId: string
   sessionTitle?: string
+  summary?: string
   key?: string
 }
 
@@ -56,17 +57,15 @@ export class DesktopNotificationService {
     const request = normalizeDesktopNotificationRequest(requestValue)
     if (request === undefined || !this.shouldNotify(request.kind) || !Notification.isSupported()) return false
 
-    const title = request.kind === 'turn-complete'
-      ? 'DeepSeek Harness 已完成回复'
-      : request.kind === 'approval'
-        ? 'DeepSeek Harness 需要权限确认'
-        : 'DeepSeek Harness 正在等待你的输入'
     const sessionTitle = normalizeSessionTitle(request.sessionTitle)
+    const title = sessionTitle
     const body = request.kind === 'turn-complete'
-      ? `${sessionTitle}的回复已完成。`
+      ? normalizeNotificationPreview(request.summary, '回复已完成。')
       : request.kind === 'approval'
-        ? `${sessionTitle}需要你确认权限后才能继续。`
-        : `${sessionTitle}需要你的回答后才能继续。`
+        ? `审批 · ${normalizeNotificationPreview(request.summary, '需要你确认权限后才能继续。')}`
+        : request.kind === 'plan-review'
+          ? `确认 · ${normalizeNotificationPreview(request.summary, '需要你审核计划后才能继续。')}`
+          : `提问 · ${normalizeNotificationPreview(request.summary, '需要你的回答后才能继续。')}`
     const notification = new Notification({
       title,
       body,
@@ -94,7 +93,7 @@ export class DesktopNotificationService {
 
   private shouldNotify(kind: DesktopNotificationKind): boolean {
     if (kind === 'approval') return this.settings.permissionRequests
-    if (kind === 'question') return this.settings.questions
+    if (kind === 'question' || kind === 'plan-review') return this.settings.questions
     if (this.settings.turnCompletion === 'never') return false
     if (this.settings.turnCompletion === 'always') return true
     const window = this.actions.getWindow()
@@ -144,18 +143,37 @@ export async function writeDesktopNotificationSettings(
 function normalizeDesktopNotificationRequest(value: unknown): DesktopNotificationRequest | undefined {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
   const candidate = value as Record<string, unknown>
-  if (candidate.kind !== 'turn-complete' && candidate.kind !== 'approval' && candidate.kind !== 'question') return undefined
+  if (candidate.kind !== 'turn-complete' && candidate.kind !== 'approval'
+    && candidate.kind !== 'question' && candidate.kind !== 'plan-review') return undefined
   if (typeof candidate.sessionId !== 'string' || candidate.sessionId.length === 0 || candidate.sessionId.length > 240) return undefined
   if (/[\r\n\0]/u.test(candidate.sessionId)) return undefined
   return {
     kind: candidate.kind,
     sessionId: candidate.sessionId,
     ...(typeof candidate.sessionTitle === 'string' ? { sessionTitle: candidate.sessionTitle } : {}),
+    ...(typeof candidate.summary === 'string' && candidate.summary.length <= 4_000
+      ? { summary: candidate.summary }
+      : {}),
     ...(typeof candidate.key === 'string' && candidate.key.length <= 500 ? { key: candidate.key } : {}),
   }
 }
 
 function normalizeSessionTitle(value: string | undefined): string {
   const normalized = value?.replace(/[\r\n\0]+/gu, ' ').trim().slice(0, 120)
-  return normalized === undefined || normalized.length === 0 ? '当前对话' : `“${normalized}”`
+  return normalized === undefined || normalized.length === 0 ? 'DeepSeek Harness' : normalized
+}
+
+function normalizeNotificationPreview(value: string | undefined, fallback: string): string {
+  const normalized = value
+    ?.replace(/```[^\n]*\n?/gu, ' ')
+    .replace(/```/gu, ' ')
+    .replace(/!\[([^\]]*)\]\([^)]*\)/gu, '$1')
+    .replace(/\[([^\]]+)\]\([^)]*\)/gu, '$1')
+    .replace(/<[^>]+>/gu, ' ')
+    .replace(/^[\s>*#+-]+/gmu, '')
+    .replace(/[`*_~]/gu, '')
+    .replace(/[\r\n\0\t ]+/gu, ' ')
+    .trim()
+    .slice(0, 240)
+  return normalized === undefined || normalized.length === 0 ? fallback : normalized
 }
