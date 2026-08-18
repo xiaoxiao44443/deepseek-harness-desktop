@@ -60,7 +60,8 @@
     "extraResources": [
       { "from": "app-icon.png", "to": "app-icon.png" },
       { "from": "titlebar-icon.png", "to": "titlebar-icon.png" },
-      { "from": "resources/dsh-desktop-bridge", "to": "dsh-desktop-bridge" }
+      { "from": "resources/dsh-desktop-bridge", "to": "dsh-desktop-bridge" },
+      { "from": "resources/dsh-desktop-browser", "to": "dsh-desktop-browser" }
     ],
     "win": {
       "icon": "app-icon.png",

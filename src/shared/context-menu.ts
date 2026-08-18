@@ -6,6 +6,7 @@ export const CONTEXT_MENU_ICONS = [
   'redo',
   'select-all',
   'external-link',
+  'browser',
   'link',
   'plugin',
   'archive',

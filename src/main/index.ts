@@ -11,6 +11,7 @@ import type { DevelopmentSettings } from './development-settings.js'
 import { HarnessDesktopBridgeHost } from './harness-desktop-bridge.js'
 import { DesktopNotificationService } from './desktop-notifications.js'
 import { PluginInitializationError, PluginRecoveryService } from './plugin-recovery.js'
+import { DesktopBrowserService } from './desktop-browser.js'
 
 // Chromium may not propagate macOS' dark color-scheme media query into the
 // cross-origin Harness iframe. Preserve explicit Harness light/dark choices,
@@ -72,6 +73,7 @@ if (!app.requestSingleInstanceLock()) {
   let directoryPicker: DirectoryPickerBridge | undefined
   let development: DevelopmentService | undefined
   let desktopBridge: HarnessDesktopBridgeHost | undefined
+  let browser: DesktopBrowserService | undefined
   let quitting = false
 
   app.on('second-instance', () => windows?.focus())
@@ -163,8 +165,10 @@ if (!app.requestSingleInstanceLock()) {
       },
     )
     await development.initialize()
+    browser = new DesktopBrowserService(join(app.getPath('userData'), 'browser'))
+    await browser.initialize()
     debugLog('[desktop] creating startup window')
-    windows = new WindowController(runtime, development, pluginRecovery)
+    windows = new WindowController(runtime, development, pluginRecovery, browser)
     windows.setRuntimePreparing()
     await windows.create()
     debugLog('[desktop] startup window created; resolving Harness runtime')
@@ -180,6 +184,9 @@ if (!app.requestSingleInstanceLock()) {
     const desktopBridgePluginRoot = app.isPackaged
       ? join(process.resourcesPath, 'dsh-desktop-bridge')
       : join(app.getAppPath(), 'resources', 'dsh-desktop-bridge')
+    const desktopBrowserPluginRoot = app.isPackaged
+      ? join(process.resourcesPath, 'dsh-desktop-browser')
+      : join(app.getAppPath(), 'resources', 'dsh-desktop-browser')
     const notifications = new DesktopNotificationService(
       join(app.getPath('userData'), 'notifications.json'),
       {
@@ -192,8 +199,11 @@ if (!app.requestSingleInstanceLock()) {
       userDataPath: app.getPath('userData'),
       pluginName: 'dsh-desktop-bridge',
       pluginRootPath: desktopBridgePluginRoot,
+      browserPluginName: 'dsh-desktop-browser',
+      browserPluginRootPath: desktopBrowserPluginRoot,
       profilePath: join(runtime.harnessHome, 'profiles', 'web'),
       notifications,
+      browser,
       restartHarness: async () => {
         if (development === undefined) throw new Error('Harness 开发服务尚未准备完成。')
         await development.restartHarness()

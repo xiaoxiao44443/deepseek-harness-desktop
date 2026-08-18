@@ -1,7 +1,7 @@
-import { ChevronDown, Code2, Copy, Minus, Square, X } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ArrowLeft, ArrowRight, Check, ChevronDown, Code2, Columns2, Copy, Globe2, History, Maximize2, Minimize2, Minus, MonitorSmartphone, MoreVertical, PanelRight, PanelRightClose, PanelRightOpen, Plus, RotateCw, Square, TabletSmartphone, Trash2, X } from 'lucide-react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import type { DesktopState, DevelopmentState, PluginRecoveryEntry, TitleMenuAction } from '../shared/contracts.js'
+import type { BrowserDisplayMode, DesktopApplicationMenuAction, DesktopBrowserHistoryEntry, DesktopBrowserShellSnapshot, DesktopBrowserViewport, DesktopState, DevelopmentState, PluginRecoveryEntry, TitleMenuAction } from '../shared/contracts.js'
 import type { DesktopContextMenuRequest } from '../shared/context-menu.js'
 import { ContextMenu } from './ContextMenu.js'
 import appIconUrl from '../../app-icon.png'
@@ -9,8 +9,23 @@ import titlebarIconUrl from '../../titlebar-icon.png'
 
 const desktopApi = window.desktop
 if (desktopApi === undefined) throw new Error('Desktop preload bridge is unavailable')
+const BROWSER_DEVICE_FRAME_GUTTER = 12
+const BROWSER_DEVICE_STAGE_GUTTER = 36
+const BROWSER_DEVICE_TOTAL_GUTTER = (BROWSER_DEVICE_FRAME_GUTTER + BROWSER_DEVICE_STAGE_GUTTER) * 2
 
 type DialogPhase = 'entering' | 'leaving' | undefined
+
+interface BrowserShellSnapshotImage {
+  dataUrl: string
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
+function FloatingWindowIcon(): ReactNode {
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 9V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v10c0 1.1.9 2 2 2h4" /><rect width="10" height="7" x="12" y="13" rx="2" /></svg>
+}
 
 function usePresence(open: boolean, exitDuration = 130): { mounted: boolean; phase: DialogPhase } {
   const [mounted, setMounted] = useState(open)
@@ -192,9 +207,32 @@ export function App(): ReactNode {
   const [startupActionPending, setStartupActionPending] = useState(false)
   const [startupActionError, setStartupActionError] = useState<string>()
   const [contextMenu, setContextMenu] = useState<DesktopContextMenuRequest>()
+  const [browserAddress, setBrowserAddress] = useState('')
+  const [browserAddressFocused, setBrowserAddressFocused] = useState(false)
+  const [browserHistoryOpen, setBrowserHistoryOpen] = useState(false)
+  const [browserHistory, setBrowserHistory] = useState<DesktopBrowserHistoryEntry[]>([])
+  const [browserDisplayMenuOpen, setBrowserDisplayMenuOpen] = useState(false)
+  const [browserSettingsMenuOpen, setBrowserSettingsMenuOpen] = useState(false)
+  const [browserShellSnapshot, setBrowserShellSnapshot] = useState<BrowserShellSnapshotImage>()
+  const [browserShellOverlayActive, setBrowserShellOverlayActive] = useState(false)
+  const [shellMenuPresentationPending, setShellMenuPresentationPending] = useState(false)
+  const [browserWidth, setBrowserWidth] = useState(() => {
+    const stored = Number(localStorage.getItem('desktop.browser.width'))
+    return Number.isFinite(stored) && stored >= 360 ? stored : 620
+  })
+  const [browserExpanded, setBrowserExpanded] = useState(false)
   const harnessFrame = useRef<HTMLIFrameElement>(null)
+  const contentRef = useRef<HTMLElement>(null)
+  const browserViewHost = useRef<HTMLDivElement>(null)
+  const browserSurfaceRef = useRef<HTMLDivElement>(null)
+  const [browserSurfaceSize, setBrowserSurfaceSize] = useState({ width: 0, height: 0 })
+  const [browserDevicePreview, setBrowserDevicePreview] = useState<DesktopBrowserViewport | undefined>(undefined)
+  const browserNormalWidth = useRef(browserWidth)
   const contextMenuRef = useRef<DesktopContextMenuRequest | undefined>(undefined)
   const releaseCloseButton = useRef<HTMLButtonElement>(null)
+  const shellOverlaySequence = useRef(0)
+  const browserShellSnapshotRef = useRef<BrowserShellSnapshotImage | undefined>(undefined)
+  const browserShellSnapshotGeneration = useRef(0)
 
   useEffect(() => {
     let disposed = false
@@ -207,6 +245,12 @@ export function App(): ReactNode {
     contextMenuRef.current = request
     setContextMenu(request)
     setMenuOpen(false)
+  }), [])
+
+  useEffect(() => desktopApi.onApplicationMenuAction((action: DesktopApplicationMenuAction) => {
+    setMenuOpen(false)
+    if (action === 'development') setDevelopmentOpen(true)
+    else if (action === 'release-notes') setReleaseNotesOpen(true)
   }), [])
 
   useEffect(() => desktopApi.onPointerInput(({ x, y }) => {
@@ -229,17 +273,33 @@ export function App(): ReactNode {
   }, [state])
 
   useEffect(() => {
+    if (!browserAddressFocused) setBrowserAddress(state?.browser.url ?? '')
+  }, [browserAddressFocused, state?.browser.url])
+
+  useEffect(() => {
+    if (state?.browser.panelOpen === false) {
+      setBrowserHistoryOpen(false)
+      setBrowserDisplayMenuOpen(false)
+      setBrowserSettingsMenuOpen(false)
+      setBrowserWidth(browserNormalWidth.current)
+      setBrowserExpanded(false)
+    }
+  }, [state?.browser.panelOpen])
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return
       if (developmentOpen) setDevelopmentOpen(false)
       else if (releaseNotesOpen) setReleaseNotesOpen(false)
       else if (menuOpen) setMenuOpen(false)
+      else if (browserDisplayMenuOpen) setBrowserDisplayMenuOpen(false)
+      else if (browserSettingsMenuOpen) setBrowserSettingsMenuOpen(false)
       else return
       event.preventDefault()
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
-  }, [developmentOpen, menuOpen, releaseNotesOpen])
+  }, [browserDisplayMenuOpen, browserSettingsMenuOpen, developmentOpen, menuOpen, releaseNotesOpen])
 
   useEffect(() => { if (releaseNotesOpen) releaseCloseButton.current?.focus({ preventScroll: true }) }, [releaseNotesOpen])
 
@@ -265,6 +325,365 @@ export function App(): ReactNode {
   const availableUpdate = state?.updateVersion !== undefined && state.updateVersion !== state.harnessVersion
   const patchEnabled = Boolean(state?.development.patchPath)
   const pluginFailure = state?.pluginFailure
+  const browserOpen = state?.browser.panelOpen === true && state.browser.settings.enabled
+  const browserDisplayMode: BrowserDisplayMode = state?.browser.settings.displayMode ?? 'split'
+  const browserModalOpen = releaseNotesOpen || developmentOpen
+  const browserPanelOpen = browserOpen && browserDisplayMode !== 'floating'
+  const browserMenuOpen = browserDisplayMenuOpen || browserSettingsMenuOpen
+  const browserDisplayModeLabel = browserDisplayMode === 'split' ? '分栏' : browserDisplayMode === 'drawer' ? '抽屉' : '独立窗口'
+  const browserViewport = state?.browser.viewport
+  const renderedBrowserViewport = browserDevicePreview ?? browserViewport
+  const browserDeviceMaxWidth = Math.max(240, Math.floor(browserSurfaceSize.width - BROWSER_DEVICE_TOTAL_GUTTER))
+  const browserDeviceMaxHeight = Math.max(240, Math.floor(browserSurfaceSize.height - BROWSER_DEVICE_TOTAL_GUTTER))
+  const browserDeviceScale = renderedBrowserViewport === undefined || browserSurfaceSize.width === 0 || browserSurfaceSize.height === 0
+    ? 1
+    : Math.max(0.1, Math.min(
+      1,
+      browserDeviceMaxWidth / renderedBrowserViewport.width,
+      browserDeviceMaxHeight / renderedBrowserViewport.height,
+    ))
+  const browserDeviceRenderedHeight = renderedBrowserViewport === undefined
+    ? 0
+    : Math.max(1, Math.min(browserDeviceMaxHeight, Math.round(renderedBrowserViewport.height * browserDeviceScale)))
+
+  useEffect(() => {
+    if (!browserModalOpen || !browserOpen) return
+    void desktopApi.setBrowserPanelOpen(false)
+  }, [browserModalOpen, browserOpen])
+
+  useEffect(() => {
+    if (browserViewport === undefined) setBrowserDevicePreview(undefined)
+    else setBrowserDevicePreview((preview) => preview?.width === browserViewport.width && preview.height === browserViewport.height ? undefined : preview)
+  }, [browserViewport?.height, browserViewport?.width])
+
+  useEffect(() => {
+    setBrowserExpanded(false)
+    if (browserDisplayMode !== 'floating') setBrowserWidth(browserNormalWidth.current)
+  }, [browserDisplayMode])
+
+  useEffect(() => {
+    const surface = browserSurfaceRef.current
+    if (surface === null) return
+    const report = (): void => setBrowserSurfaceSize({ width: surface.clientWidth, height: surface.clientHeight })
+    const observer = new ResizeObserver(report)
+    observer.observe(surface)
+    report()
+    return () => observer.disconnect()
+  }, [browserPanelOpen, state?.browser.viewport])
+
+  useEffect(() => {
+    const host = browserViewHost.current
+    const surface = browserSurfaceRef.current
+    if (!browserPanelOpen || browserHistoryOpen || browserModalOpen || !state?.browser.url || host === null) {
+      void desktopApi.setBrowserViewBounds(null)
+      return
+    }
+    let frame = 0
+    const report = (): void => {
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(() => {
+        const rect = host.getBoundingClientRect()
+        if (rect.width < 1 || rect.height < 1) {
+          void desktopApi.setBrowserViewBounds(null)
+          return
+        }
+        void desktopApi.setBrowserViewBounds({
+          x: rect.x,
+          y: rect.y,
+          width: rect.width,
+          height: rect.height,
+        })
+      })
+    }
+    const observer = new ResizeObserver(report)
+    observer.observe(host)
+    if (surface !== null) observer.observe(surface)
+    window.addEventListener('resize', report)
+    report()
+    return () => {
+      cancelAnimationFrame(frame)
+      observer.disconnect()
+      window.removeEventListener('resize', report)
+    }
+  }, [browserHistoryOpen, browserModalOpen, browserPanelOpen, state?.browser.url, state?.browser.viewport?.height, state?.browser.viewport?.width])
+
+  const clearBrowserShellSnapshot = useCallback(() => {
+    browserShellSnapshotGeneration.current += 1
+    browserShellSnapshotRef.current = undefined
+    setBrowserShellSnapshot(undefined)
+    setBrowserShellOverlayActive(false)
+  }, [])
+
+  const prepareBrowserShellSnapshot = useCallback(async (snapshot: DesktopBrowserShellSnapshot, generation = browserShellSnapshotGeneration.current): Promise<BrowserShellSnapshotImage | undefined> => {
+    const alreadyDecoded = browserShellSnapshotRef.current?.dataUrl === snapshot.dataUrl
+    if (!alreadyDecoded) {
+      const decoded = await new Promise<boolean>((resolve) => {
+        const image = new Image()
+        image.onload = () => resolve(true)
+        image.onerror = () => resolve(false)
+        image.src = snapshot.dataUrl
+      })
+      if (!decoded) return undefined
+    }
+    if (generation !== browserShellSnapshotGeneration.current) return undefined
+    const host = browserViewHost.current
+    if (host === null) return undefined
+    const hostRect = host.getBoundingClientRect()
+    const prepared = {
+      dataUrl: snapshot.dataUrl,
+      left: snapshot.bounds.x - hostRect.x,
+      top: snapshot.bounds.y - hostRect.y,
+      width: snapshot.bounds.width,
+      height: snapshot.bounds.height,
+    }
+    if (generation !== browserShellSnapshotGeneration.current) return undefined
+    browserShellSnapshotRef.current = prepared
+    setBrowserShellSnapshot(prepared)
+    return prepared
+  }, [])
+
+  useEffect(() => {
+    if (!browserPanelOpen || browserHistoryOpen || browserModalOpen || !state?.browser.url) {
+      clearBrowserShellSnapshot()
+      return
+    }
+    const generation = ++browserShellSnapshotGeneration.current
+    let disposed = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const refresh = async (): Promise<void> => {
+      const snapshot = await desktopApi.refreshBrowserShellSnapshot().catch(() => undefined)
+      if (!disposed && snapshot !== undefined) await prepareBrowserShellSnapshot(snapshot, generation)
+      if (!disposed) timer = setTimeout(() => void refresh(), 1000)
+    }
+    void refresh()
+    return () => {
+      disposed = true
+      if (browserShellSnapshotGeneration.current === generation) clearBrowserShellSnapshot()
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }, [browserHistoryOpen, browserModalOpen, browserPanelOpen, clearBrowserShellSnapshot, prepareBrowserShellSnapshot, state?.browser.url, state?.browser.viewport?.height, state?.browser.viewport?.width])
+
+  useLayoutEffect(() => {
+    const sequence = ++shellOverlaySequence.current
+    const menuVisible = menuOpen || contextMenu !== undefined || browserMenuOpen
+    if (!menuVisible) {
+      setShellMenuPresentationPending(false)
+      setBrowserShellOverlayActive(false)
+      void desktopApi.setBrowserShellOverlay(null)
+      return
+    }
+    setShellMenuPresentationPending(true)
+    queueMicrotask(() => {
+      if (shellOverlaySequence.current !== sequence) return
+      const menus = [...document.querySelectorAll<HTMLElement>('#title-menu-popover, .context-menu-card')]
+        .filter((element) => element.offsetWidth > 0 && element.offsetHeight > 0)
+      if (menus.length === 0) {
+        setShellMenuPresentationPending(false)
+        setBrowserShellOverlayActive(false)
+        void desktopApi.setBrowserShellOverlay(null)
+        return
+      }
+      const rects = menus.map((element) => element.getBoundingClientRect())
+      const left = Math.min(...rects.map((rect) => rect.left))
+      const top = Math.min(...rects.map((rect) => rect.top))
+      const right = Math.max(...rects.map((rect) => rect.right))
+      const bottom = Math.max(...rects.map((rect) => rect.bottom))
+      const host = browserViewHost.current
+      if (host === null) {
+        setShellMenuPresentationPending(false)
+        setBrowserShellOverlayActive(false)
+        void desktopApi.setBrowserShellOverlay(null)
+        return
+      }
+      const hostRect = host.getBoundingClientRect()
+      const overlapsBrowser = left < hostRect.right && right > hostRect.left && top < hostRect.bottom && bottom > hostRect.top
+      if (!overlapsBrowser) {
+        setShellMenuPresentationPending(false)
+        setBrowserShellOverlayActive(false)
+        void desktopApi.setBrowserShellOverlay(null)
+        return
+      }
+      void desktopApi.refreshBrowserShellSnapshot()
+        .then((snapshot) => snapshot === undefined ? undefined : prepareBrowserShellSnapshot(snapshot))
+        .catch(() => undefined)
+      void desktopApi.setBrowserShellOverlay({ x: left, y: top, width: right - left, height: bottom - top }).then(async (snapshot) => {
+        if (shellOverlaySequence.current !== sequence) return
+        if (snapshot === undefined) {
+          setShellMenuPresentationPending(false)
+          return
+        }
+        const prepared = await prepareBrowserShellSnapshot(snapshot)
+        if (prepared === undefined || shellOverlaySequence.current !== sequence) {
+          setShellMenuPresentationPending(false)
+          return
+        }
+        setBrowserShellOverlayActive(true)
+        await desktopApi.commitBrowserShellOverlay()
+        requestAnimationFrame(() => {
+          if (shellOverlaySequence.current === sequence) setShellMenuPresentationPending(false)
+        })
+      }).catch(() => {
+        if (shellOverlaySequence.current === sequence) setShellMenuPresentationPending(false)
+      })
+    })
+  }, [browserDisplayMenuOpen, browserSettingsMenuOpen, contextMenu, menuOpen, prepareBrowserShellSnapshot])
+
+  useEffect(() => {
+    const content = contentRef.current
+    if (!browserPanelOpen || content === null) return
+    const resize = (): void => {
+      if (browserExpanded) {
+        setBrowserWidth(content.clientWidth)
+      } else {
+        const reserved = browserDisplayMode === 'split' ? 360 : 48
+        const maxNormal = Math.max(360, content.clientWidth - reserved)
+        setBrowserWidth((current) => Math.min(maxNormal, Math.max(360, current)))
+      }
+    }
+    const observer = new ResizeObserver(resize)
+    observer.observe(content)
+    resize()
+    return () => observer.disconnect()
+  }, [browserDisplayMode, browserExpanded, browserPanelOpen])
+
+  const startBrowserResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const content = contentRef.current
+    if (content === null || browserExpanded || browserDisplayMode === 'floating') return
+    event.preventDefault()
+    const handle = event.currentTarget
+    const pointerId = event.pointerId
+    handle.setPointerCapture(pointerId)
+    let frame = 0
+    let pendingWidth = browserNormalWidth.current
+    const commit = (): void => {
+      frame = 0
+      browserNormalWidth.current = pendingWidth
+      setBrowserWidth(pendingWidth)
+    }
+    const move = (pointer: PointerEvent): void => {
+      const rect = content.getBoundingClientRect()
+      const reserved = browserDisplayMode === 'split' ? 360 : 48
+      pendingWidth = Math.min(Math.max(360, rect.width - reserved), Math.max(360, rect.right - pointer.clientX))
+      if (frame === 0) frame = requestAnimationFrame(commit)
+    }
+    const finish = (): void => {
+      if (frame !== 0) {
+        cancelAnimationFrame(frame)
+        commit()
+      }
+      localStorage.setItem('desktop.browser.width', String(Math.round(pendingWidth)))
+      if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId)
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', finish)
+      window.removeEventListener('pointercancel', finish)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', finish)
+    window.addEventListener('pointercancel', finish)
+  }, [browserDisplayMode, browserExpanded])
+
+  const toggleBrowserExpanded = useCallback(() => {
+    const content = contentRef.current
+    if (content === null) return
+    if (browserExpanded) {
+      if (browserDisplayMode !== 'floating') setBrowserWidth(browserNormalWidth.current)
+      setBrowserExpanded(false)
+      return
+    }
+    if (browserDisplayMode !== 'floating') browserNormalWidth.current = browserWidth
+    setBrowserWidth(content.clientWidth)
+    setBrowserExpanded(true)
+  }, [browserDisplayMode, browserExpanded, browserWidth])
+
+  const openBrowserHistory = useCallback(async () => {
+    setBrowserDisplayMenuOpen(false)
+    setBrowserSettingsMenuOpen(false)
+    setBrowserHistory(await desktopApi.getBrowserHistory())
+    setBrowserHistoryOpen(true)
+  }, [])
+
+  const navigateBrowser = useCallback(async (value: string) => {
+    const address = value.trim()
+    if (address.length === 0) return
+    setBrowserHistoryOpen(false)
+    await desktopApi.navigateBrowser(address)
+  }, [])
+
+  const selectBrowserDisplayMode = useCallback(async (mode: BrowserDisplayMode) => {
+    setBrowserDisplayMenuOpen(false)
+    await desktopApi.setBrowserDisplayMode(mode)
+  }, [])
+
+  const setDeviceViewport = useCallback((width: number, height: number) => {
+    void desktopApi.setBrowserDeviceViewport({
+      width: Math.max(240, Math.min(3840, Math.round(width))),
+      height: Math.max(240, Math.min(2160, Math.round(height))),
+    })
+  }, [])
+
+  const openBrowserMenu = useCallback((kind: 'display' | 'settings', _target: HTMLButtonElement) => {
+    if (kind === 'display') { setBrowserSettingsMenuOpen(false); setBrowserDisplayMenuOpen((open) => !open) }
+    else { setBrowserDisplayMenuOpen(false); setBrowserSettingsMenuOpen((open) => !open) }
+  }, [])
+
+  const startDeviceResize = useCallback((event: React.PointerEvent<HTMLDivElement>, direction: string) => {
+    const viewport = state?.browser.viewport
+    if (viewport === undefined) return
+    event.preventDefault()
+    event.stopPropagation()
+    const handle = event.currentTarget
+    const pointerId = event.pointerId
+    handle.setPointerCapture(pointerId)
+    const startX = event.clientX
+    const startY = event.clientY
+    const scale = Math.max(0.1, browserDeviceScale)
+    const maxWidth = Math.min(3840, Math.max(240, Math.floor(browserDeviceMaxWidth / scale)))
+    const maxHeight = Math.min(2160, Math.max(240, Math.floor(browserDeviceMaxHeight / scale)))
+    const startWidth = Math.min(viewport.width, maxWidth)
+    const startHeight = Math.min(viewport.height, maxHeight)
+    const frameElement = handle.closest<HTMLElement>('.browser-device-frame')
+    let nextWidth = startWidth
+    let nextHeight = startHeight
+    let frame = 0
+    const preview = (): void => {
+      frame = 0
+      const viewport = {
+        width: Math.max(240, Math.min(maxWidth, Math.round(nextWidth))),
+        height: Math.max(240, Math.min(maxHeight, Math.round(nextHeight))),
+      }
+      if (frameElement !== null) {
+        frameElement.style.width = `${String(Math.round(viewport.width * scale) + BROWSER_DEVICE_FRAME_GUTTER * 2)}px`
+        frameElement.style.height = `${String(Math.max(1, Math.min(browserDeviceMaxHeight, Math.round(viewport.height * scale))) + BROWSER_DEVICE_FRAME_GUTTER * 2)}px`
+      }
+      void desktopApi.previewBrowserDeviceViewport(viewport)
+    }
+    const move = (pointer: PointerEvent): void => {
+      // The device frame is centered in the stage, so changing its size moves
+      // each edge by half of the total delta. Compensate for that geometry so
+      // the active handle follows the pointer one-for-one.
+      const dx = ((pointer.clientX - startX) * 2) / scale
+      const dy = ((pointer.clientY - startY) * 2) / scale
+      if (direction.includes('e')) nextWidth = startWidth + dx
+      if (direction.includes('w')) nextWidth = startWidth - dx
+      if (direction.includes('s')) nextHeight = startHeight + dy
+      if (direction.includes('n')) nextHeight = startHeight - dy
+      if (frame === 0) frame = requestAnimationFrame(preview)
+    }
+    const finish = (): void => {
+      if (frame !== 0) { cancelAnimationFrame(frame); preview() }
+      const width = Math.max(240, Math.min(maxWidth, Math.round(nextWidth)))
+      const height = Math.max(240, Math.min(maxHeight, Math.round(nextHeight)))
+      setBrowserDevicePreview({ width, height })
+      void desktopApi.setBrowserDeviceViewport({ width, height })
+      if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId)
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', finish)
+      window.removeEventListener('pointercancel', finish)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', finish)
+    window.addEventListener('pointercancel', finish)
+  }, [browserDeviceMaxHeight, browserDeviceMaxWidth, browserDeviceScale, state?.browser.viewport])
 
   const dismissContextMenu = useCallback((restoreFocus = true): void => {
     const current = contextMenuRef.current
@@ -311,8 +730,9 @@ export function App(): ReactNode {
 
   return (
     <>
-      <main className="content">
-        {harnessUrl ? <iframe key={state?.harnessLoadId} ref={harnessFrame} id="harness-frame" name="harness-frame" className="harness-frame" title="DeepSeek Harness" allow="clipboard-read; clipboard-write" src={harnessUrl} onLoad={() => void desktopApi.reportHarnessFrameLoaded(harnessUrl)} /> : null}
+      <main ref={contentRef} className="content">
+        <section className="harness-pane">
+          {harnessUrl ? <iframe key={state?.harnessLoadId} ref={harnessFrame} id="harness-frame" name="harness-frame" className="harness-frame" title="DeepSeek Harness" allow="clipboard-read; clipboard-write" src={harnessUrl} onLoad={() => void desktopApi.reportHarnessFrameLoaded(harnessUrl)} /> : null}
         {!ready ? (
           <section className={`startup ${state?.harnessLifecycle === 'error' ? 'error' : ''}`}>
             {runtimePreparationProgress !== undefined ? (
@@ -343,13 +763,128 @@ export function App(): ReactNode {
             ) : state?.harnessLifecycle === 'error' ? <button className="secondary-button" type="button" onClick={() => void desktopApi.checkForHarnessUpdate()}>重新检查更新</button> : null}
           </section>
         ) : null}
+        </section>
+        {browserPanelOpen ? (
+          <aside className={`browser-pane mode-${browserDisplayMode}${browserExpanded ? ' expanded' : ''}`} style={browserExpanded ? undefined : { width: browserWidth }} aria-label="内置浏览器">
+            {browserExpanded ? null : <div className="browser-resizer" role="separator" aria-orientation="vertical" onPointerDown={startBrowserResize} />}
+            <header className="browser-chrome">
+              <div className="browser-tabbar">
+                <div className="browser-tab" title={state?.browser.url ? state.browser.title || state.browser.url : '新标签页'}><Globe2 aria-hidden="true" /><span>{state?.browser.url ? state.browser.title || state.browser.url : '新标签页'}</span></div>
+                <div className="browser-panel-actions">
+                  <button type="button" aria-label={browserExpanded ? '恢复面板宽度' : '展开面板'} title={browserExpanded ? '恢复面板宽度' : '展开面板'} onClick={toggleBrowserExpanded}>{browserExpanded ? <Minimize2 /> : <Maximize2 />}</button>
+                  <button type="button" aria-label={`显示方式：${browserDisplayModeLabel}`} aria-expanded={browserDisplayMenuOpen} title={`显示方式：${browserDisplayModeLabel}`} onClick={(event) => openBrowserMenu('display', event.currentTarget)}>
+                    {browserDisplayMode === 'split' ? <Columns2 /> : browserDisplayMode === 'drawer' ? <PanelRight /> : <FloatingWindowIcon />}
+                  </button>
+                </div>
+              </div>
+              <div className="browser-toolbar">
+              <div className="browser-navigation">
+                <button type="button" aria-label="后退" disabled={!state?.browser.canGoBack} onClick={() => void desktopApi.browserNavigationAction('back')}><ArrowLeft /></button>
+                <button type="button" aria-label="前进" disabled={!state?.browser.canGoForward} onClick={() => void desktopApi.browserNavigationAction('forward')}><ArrowRight /></button>
+                <button type="button" aria-label={state?.browser.loading ? '停止加载' : '重新加载'} onClick={() => void desktopApi.browserNavigationAction(state?.browser.loading ? 'stop' : 'reload')}><RotateCw className={state?.browser.loading ? 'browser-loading' : ''} /></button>
+              </div>
+              <form className="browser-address" onSubmit={(event) => { event.preventDefault(); void navigateBrowser(browserAddress) }}>
+                <Globe2 aria-hidden="true" />
+                <input value={browserAddress} aria-label="网页地址" placeholder="输入网址或搜索内容" spellCheck={false} onFocus={() => setBrowserAddressFocused(true)} onBlur={() => setBrowserAddressFocused(false)} onChange={(event) => setBrowserAddress(event.target.value)} />
+              </form>
+              <div className="browser-actions">
+                <button type="button" aria-label="浏览器设置" aria-expanded={browserSettingsMenuOpen} onClick={(event) => openBrowserMenu('settings', event.currentTarget)}><MoreVertical /></button>
+              </div>
+              </div>
+            </header>
+            {state?.browser.viewport ? (
+              <div className="browser-device-toolbar">
+                <strong>尺寸:</strong><span>响应式</span>
+                <input key={`width-${String(state.browser.viewport.width)}`} type="number" min={240} max={3840} defaultValue={state.browser.viewport.width} aria-label="设备宽度" onBlur={(event) => setDeviceViewport(Number(event.currentTarget.value), state.browser.viewport?.height ?? 860)} />
+                <span>×</span>
+                <input key={`height-${String(state.browser.viewport.height)}`} type="number" min={240} max={2160} defaultValue={state.browser.viewport.height} aria-label="设备高度" onBlur={(event) => setDeviceViewport(state.browser.viewport?.width ?? 583, Number(event.currentTarget.value))} />
+                <button type="button" aria-label="旋转设备" title="旋转设备" onClick={() => setDeviceViewport(state.browser.viewport?.height ?? 860, state.browser.viewport?.width ?? 583)}><TabletSmartphone /></button>
+                <span>{Math.round((state.browser.zoomFactor ?? 1) * 100)}%</span>
+                <button className="device-toolbar-close" type="button" aria-label="关闭设备工具栏" title="关闭设备工具栏" onClick={() => void desktopApi.setBrowserDeviceViewport(null)}><X /></button>
+              </div>
+            ) : null}
+            {browserMenuOpen ? (
+              <div className={`browser-menu-layer${shellMenuPresentationPending ? ' shell-overlay-pending' : ''}${browserShellOverlayActive ? ' shell-overlay-synchronized' : ''}`} onPointerDown={() => { setBrowserDisplayMenuOpen(false); setBrowserSettingsMenuOpen(false) }}>
+                {browserDisplayMenuOpen ? (
+                  <div className="context-menu-card browser-popover display-popover" role="menu" aria-label="浏览器显示方式" onPointerDown={(event) => event.stopPropagation()}>
+                    {([
+                      ['split', '分栏', <Columns2 key="split" />],
+                      ['drawer', '抽屉', <PanelRight key="drawer" />],
+                      ['floating', '独立窗口', <FloatingWindowIcon key="floating" />],
+                    ] as const).map(([mode, label, icon]) => (
+                      <button key={mode} className="context-menu-item browser-mode-item" type="button" role="menuitemradio" aria-checked={browserDisplayMode === mode} onClick={() => void selectBrowserDisplayMode(mode)}>
+                        <span className="context-menu-icon">{icon}</span><span className="context-menu-label">{label}</span>{browserDisplayMode === mode ? <Check className="browser-menu-check" /> : null}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+                {browserSettingsMenuOpen ? (
+                  <div className="context-menu-card browser-popover settings-popover" role="menu" aria-label="浏览器设置" onPointerDown={(event) => event.stopPropagation()}>
+                    <button className="context-menu-item" type="button" role="menuitem" onClick={() => void openBrowserHistory()}><span className="context-menu-icon"><History /></span><span className="context-menu-label">历史记录</span></button>
+                    <button className="context-menu-item" type="button" role="menuitem" onClick={() => { setBrowserSettingsMenuOpen(false); void desktopApi.clearBrowserData() }}><span className="context-menu-icon"><Trash2 /></span><span className="context-menu-label">清除浏览数据</span></button>
+                    <div className="context-menu-separator" />
+                    <div className="browser-zoom-row" role="group" aria-label="网页缩放">
+                      <span>缩放</span>
+                      <button type="button" aria-label="缩小" disabled={(state?.browser.zoomFactor ?? 1) <= 0.5} onClick={() => void desktopApi.setBrowserZoomFactor((state?.browser.zoomFactor ?? 1) - 0.1)}><Minus /></button>
+                      <strong>{Math.round((state?.browser.zoomFactor ?? 1) * 100)}%</strong>
+                      <button type="button" aria-label="放大" disabled={(state?.browser.zoomFactor ?? 1) >= 2} onClick={() => void desktopApi.setBrowserZoomFactor((state?.browser.zoomFactor ?? 1) + 0.1)}><Plus /></button>
+                      <button type="button" aria-label="重置缩放" title="重置" disabled={(state?.browser.zoomFactor ?? 1) === 1} onClick={() => void desktopApi.setBrowserZoomFactor(1)}><RotateCw /></button>
+                    </div>
+                    <div className="context-menu-separator" />
+                    <button className="context-menu-item" type="button" role="menuitem" disabled={!state?.browser.url} onClick={() => {
+                      setBrowserSettingsMenuOpen(false)
+                      void desktopApi.setBrowserDeviceViewport(state?.browser.viewport ? null : { width: 583, height: 860 })
+                    }}>
+                      <span className="context-menu-icon"><MonitorSmartphone /></span><span className="context-menu-label">{state?.browser.viewport ? '隐藏设备工具栏' : '显示设备工具栏'}</span>
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            <div ref={browserSurfaceRef} className={`browser-surface${browserViewport ? ' device-active' : ''}${browserShellOverlayActive ? ' shell-overlay-active' : ''}`}>
+              {browserHistoryOpen ? (
+                <section className="browser-history" aria-label="浏览历史">
+                  <header><button className="browser-history-back" type="button" aria-label="返回网页" onClick={() => setBrowserHistoryOpen(false)}><ArrowLeft /></button><div><h2>浏览历史</h2><p>仅保存在这台设备的内置浏览器中</p></div><button type="button" disabled={browserHistory.length === 0} onClick={() => void desktopApi.clearBrowserHistory().then(() => setBrowserHistory([]))}>清除</button></header>
+                  <div className="browser-history-list">
+                    {browserHistory.length === 0 ? <p className="browser-empty">暂无浏览记录</p> : browserHistory.map((entry) => (
+                      <button key={entry.id} type="button" onClick={() => void navigateBrowser(entry.url)}>
+                        <Globe2 aria-hidden="true" /><span><strong>{entry.title}</strong><small>{entry.url}</small></span><time>{new Date(entry.visitedAt).toLocaleString()}</time>
+                      </button>
+                    ))}
+                  </div>
+                </section>
+              ) : state?.browser.url && renderedBrowserViewport ? (
+                <div className="browser-device-stage">
+                  <div className="browser-device-frame" style={{ width: Math.round(renderedBrowserViewport.width * browserDeviceScale) + BROWSER_DEVICE_FRAME_GUTTER * 2, height: browserDeviceRenderedHeight + BROWSER_DEVICE_FRAME_GUTTER * 2 }}>
+                    <div ref={browserViewHost} className="browser-view-host">
+                      {browserShellSnapshot ? <img className="browser-shell-snapshot" src={browserShellSnapshot.dataUrl} alt="" aria-hidden="true" style={{ left: browserShellSnapshot.left, top: browserShellSnapshot.top, width: browserShellSnapshot.width, height: browserShellSnapshot.height }} /> : null}
+                    </div>
+                    {['n', 'e', 's', 'w', 'ne', 'se', 'sw', 'nw'].map((direction) => <div key={direction} className={`device-resize-handle ${direction}`} onPointerDown={(event) => startDeviceResize(event, direction)} />)}
+                  </div>
+                </div>
+              ) : state?.browser.url ? <div ref={browserViewHost} className="browser-view-host">
+                {browserShellSnapshot ? <img className="browser-shell-snapshot" src={browserShellSnapshot.dataUrl} alt="" aria-hidden="true" style={{ left: browserShellSnapshot.left, top: browserShellSnapshot.top, width: browserShellSnapshot.width, height: browserShellSnapshot.height }} /> : null}
+              </div> : (
+                <section className="browser-welcome"><Globe2 aria-hidden="true" /><h2>内置浏览器</h2><p>在上方输入网址，或让 Agent 在后台打开网页。</p></section>
+              )}
+            </div>
+          </aside>
+        ) : null}
       </main>
 
       <header className="titlebar">
-        <button id="title-menu" className="brand" type="button" aria-label="打开应用菜单" aria-expanded={menuOpen} title="应用菜单" onClick={(event) => { event.currentTarget.blur(); setMenuOpen((open) => !open) }}>
+        <button id="title-menu" className="brand" type="button" aria-label="打开应用菜单" aria-expanded={menuOpen} title="应用菜单" onClick={(event) => {
+          event.currentTarget.blur()
+          setMenuOpen((open) => !open)
+        }}>
           <span className="brand-mark-shell" aria-hidden="true"><img className="brand-mark" src={titlebarIconUrl} alt="" draggable="false" /></span><span>DeepSeek Harness</span><ChevronDown className="menu-chevron" aria-hidden="true" />
         </button>
         <div className="drag-region" aria-hidden="true" />
+        {state?.browser.settings.enabled ? (
+          <button className="titlebar-browser-button" type="button" aria-label={browserOpen ? '隐藏浏览器侧栏' : '显示浏览器侧栏'} aria-pressed={browserOpen} onClick={() => void desktopApi.setBrowserPanelOpen(!browserOpen)}>
+            {browserOpen ? <PanelRightClose /> : <PanelRightOpen />}
+          </button>
+        ) : null}
         <div className="window-controls" aria-hidden={state?.platform === 'macos'}>
           <button id="minimize" className="window-button" type="button" aria-label="最小化" onClick={() => void desktopApi.windowAction('minimize')}><Minus /></button>
           <button id="maximize" className="window-button" type="button" aria-label={state?.isMaximized ? '还原' : '最大化'} onClick={() => void desktopApi.windowAction('toggle-maximize')}>{state?.isMaximized ? <Copy className="restore-icon" /> : <Square className="maximize-icon" />}</button>
@@ -358,7 +893,7 @@ export function App(): ReactNode {
       </header>
 
       {menuOpen && state !== undefined && update !== undefined ? (
-        <section id="title-menu-popover" className="menu-card" role="menu" aria-label="DeepSeek Harness 应用菜单">
+        <section id="title-menu-popover" className={`menu-card${shellMenuPresentationPending ? ' shell-overlay-pending' : ''}${browserShellOverlayActive ? ' shell-overlay-synchronized' : ''}`} role="menu" aria-label="DeepSeek Harness 应用菜单">
           <div className="menu-list">
             <button id="development-action" className="menu-item" type="button" role="menuitem" onClick={(event) => { event.currentTarget.blur(); setMenuOpen(false); setDevelopmentOpen(true) }}><span className="item-label">开发工具</span><span className="item-meta">{patchEnabled ? 'Patch 已启用' : 'Patch 与 Plugin'}</span><span className="item-dot" aria-hidden="true" /></button>
             <button id="update-action" className="menu-item" type="button" role="menuitem" disabled={update.disabled} onClick={(event) => { event.currentTarget.blur(); void runMenuAction('update') }}><span id="update-title" className="item-label">{update.title}</span><span className="item-meta">{update.detail}</span><span className={update.dotClass} aria-hidden="true" /></button>
@@ -372,6 +907,8 @@ export function App(): ReactNode {
         <ContextMenu
           menu={contextMenu}
           onSelect={selectContextMenuItem}
+          presentationPending={shellMenuPresentationPending}
+          presentationSynchronized={browserShellOverlayActive}
         />
       )}
 

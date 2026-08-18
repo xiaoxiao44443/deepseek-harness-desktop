@@ -1,5 +1,20 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { DesktopBridge, DesktopState, DevelopmentPluginRequest, TitleMenuAction, WindowAction } from './shared/contracts.js'
+import type {
+  DesktopBridge,
+  BrowserDisplayMode,
+  BrowserMenuKind,
+  DesktopBrowserMenuAnchor,
+  DesktopBrowserHistoryEntry,
+  DesktopBrowserNavigationAction,
+  DesktopBrowserShellSnapshot,
+  DesktopBrowserViewBounds,
+  DesktopBrowserViewport,
+  DesktopApplicationMenuAction,
+  DesktopState,
+  DevelopmentPluginRequest,
+  TitleMenuAction,
+  WindowAction,
+} from './shared/contracts.js'
 import type { DesktopContextMenuActionRequest, DesktopContextMenuRequest, DesktopPointerInput } from './shared/context-menu.js'
 
 const bridge: DesktopBridge = {
@@ -15,12 +30,32 @@ const bridge: DesktopBridge = {
   recoverFailedPlugin: () => ipcRenderer.invoke('desktop:plugin-recovery-disable') as Promise<void>,
   restoreRecoveredPlugin: (entryId: string) => ipcRenderer.invoke('desktop:plugin-recovery-restore', entryId) as Promise<void>,
   runDevelopmentPlugin: (request: DevelopmentPluginRequest) => ipcRenderer.invoke('desktop:development-run-plugin', request) as Promise<void>,
+  setBrowserPanelOpen: (open: boolean) => ipcRenderer.invoke('desktop:browser-panel-open', open) as Promise<void>,
+  setBrowserDisplayMode: (mode: BrowserDisplayMode) => ipcRenderer.invoke('desktop:browser-display-mode', mode) as Promise<void>,
+  openBrowserMenu: (kind: BrowserMenuKind, anchor: DesktopBrowserMenuAnchor) => ipcRenderer.invoke('desktop:browser-open-menu', kind, anchor) as Promise<void>,
+  setBrowserZoomFactor: (factor: number) => ipcRenderer.invoke('desktop:browser-zoom-factor', factor) as Promise<void>,
+  setBrowserDeviceViewport: (viewport: DesktopBrowserViewport | null) => ipcRenderer.invoke('desktop:browser-device-viewport', viewport) as Promise<void>,
+  previewBrowserDeviceViewport: (viewport: DesktopBrowserViewport) => ipcRenderer.invoke('desktop:browser-device-preview', viewport) as Promise<void>,
+  setBrowserViewBounds: (bounds: DesktopBrowserViewBounds | null) => ipcRenderer.invoke('desktop:browser-view-bounds', bounds) as Promise<void>,
+  refreshBrowserShellSnapshot: () => ipcRenderer.invoke('desktop:browser-shell-snapshot') as Promise<DesktopBrowserShellSnapshot | undefined>,
+  setBrowserShellOverlay: (bounds: DesktopBrowserViewBounds | null) => ipcRenderer.invoke('desktop:browser-shell-overlay', bounds) as Promise<DesktopBrowserShellSnapshot | undefined>,
+  commitBrowserShellOverlay: () => ipcRenderer.invoke('desktop:browser-shell-overlay-commit') as Promise<void>,
+  navigateBrowser: (value: string) => ipcRenderer.invoke('desktop:browser-navigate', value) as Promise<void>,
+  browserNavigationAction: (action: DesktopBrowserNavigationAction) => ipcRenderer.invoke('desktop:browser-navigation-action', action) as Promise<void>,
+  getBrowserHistory: () => ipcRenderer.invoke('desktop:browser-history') as Promise<DesktopBrowserHistoryEntry[]>,
+  clearBrowserHistory: () => ipcRenderer.invoke('desktop:browser-clear-history') as Promise<void>,
+  clearBrowserData: () => ipcRenderer.invoke('desktop:browser-clear-data') as Promise<void>,
   selectContextMenuItem: (request: DesktopContextMenuActionRequest) => ipcRenderer.invoke('desktop:context-menu-select', request) as Promise<void>,
   dismissContextMenu: (requestId: string, restoreFocus = true) => ipcRenderer.invoke('desktop:context-menu-dismiss', requestId, restoreFocus) as Promise<void>,
   onState(listener: (state: DesktopState) => void) {
     const handler = (_event: Electron.IpcRendererEvent, state: DesktopState): void => listener(state)
     ipcRenderer.on('desktop:state', handler)
     return () => ipcRenderer.off('desktop:state', handler)
+  },
+  onApplicationMenuAction(listener: (action: DesktopApplicationMenuAction) => void) {
+    const handler = (_event: Electron.IpcRendererEvent, action: DesktopApplicationMenuAction): void => listener(action)
+    ipcRenderer.on('desktop:application-menu-action', handler)
+    return () => ipcRenderer.off('desktop:application-menu-action', handler)
   },
   onContextMenu(listener: (request: DesktopContextMenuRequest) => void) {
     const handler = (_event: Electron.IpcRendererEvent, request: DesktopContextMenuRequest): void => listener(request)

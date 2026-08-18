@@ -7,6 +7,7 @@ import {
   FolderOpen,
   Link,
   MousePointer2,
+  PanelRightOpen,
   Pencil,
   Puzzle,
   RefreshCw,
@@ -32,6 +33,7 @@ const menuIcons: Record<ContextMenuIcon, LucideIcon> = {
   redo: RotateCw,
   'select-all': MousePointer2,
   'external-link': ExternalLink,
+  browser: PanelRightOpen,
   link: Link,
   plugin: Puzzle,
   archive: Archive,
@@ -47,9 +49,11 @@ const menuIcons: Record<ContextMenuIcon, LucideIcon> = {
 interface ContextMenuProps {
   menu: DesktopContextMenuRequest
   onSelect: (itemId: string) => void
+  presentationPending?: boolean
+  presentationSynchronized?: boolean
 }
 
-export function ContextMenu({ menu, onSelect }: ContextMenuProps): ReactNode {
+export function ContextMenu({ menu, onSelect, presentationPending = false, presentationSynchronized = false }: ContextMenuProps): ReactNode {
   const card = useRef<HTMLElement>(null)
   const [position, setPosition] = useState({ x: menu.x, y: menu.y })
 
@@ -74,7 +78,7 @@ export function ContextMenu({ menu, onSelect }: ContextMenuProps): ReactNode {
   return (
     <section
       ref={card}
-      className="context-menu-card"
+      className={`context-menu-card${presentationPending ? ' shell-overlay-pending' : ''}${presentationSynchronized ? ' shell-overlay-synchronized' : ''}`}
       role="menu"
       aria-label="右键菜单"
       tabIndex={-1}
@@ -94,7 +98,14 @@ export function ContextMenu({ menu, onSelect }: ContextMenuProps): ReactNode {
             disabled={!entry.enabled}
             tabIndex={-1}
             key={entry.id}
-            onClick={() => onSelect(entry.id)}
+            onAuxClick={(event) => event.preventDefault()}
+            onClick={(event) => {
+              if (event.button !== 0) {
+                event.preventDefault()
+                return
+              }
+              onSelect(entry.id)
+            }}
           >
             <span className="context-menu-icon" aria-hidden="true">
               {entry.checked === true ? <Check /> : Icon === undefined ? null : <Icon />}

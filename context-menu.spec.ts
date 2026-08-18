@@ -90,6 +90,30 @@ describe('desktop context menu protocol', () => {
     expect(withSelection.some((entry) => entry.kind === 'item' && entry.id === 'desktop.copy')).toBe(true)
   })
 
+  it('separates embedded and default browser link actions', () => {
+    const items = buildBuiltinContextMenuItems({
+      isEditable: false,
+      selectionText: '',
+      linkURL: 'https://example.com/',
+      editFlags: {
+        canUndo: false,
+        canRedo: false,
+        canCut: false,
+        canCopy: false,
+        canPaste: false,
+        canDelete: false,
+        canSelectAll: true,
+        canEditRichly: false,
+      },
+    }, { embeddedBrowserEnabled: true })
+
+    expect(items.filter((entry) => entry.kind === 'item').slice(0, 3)).toEqual([
+      { kind: 'item', id: 'desktop.open-link-in-browser', label: '在内置浏览器中打开', enabled: true, icon: 'browser' },
+      { kind: 'item', id: 'desktop.open-link', label: '在默认浏览器中打开', enabled: true, icon: 'external-link' },
+      { kind: 'item', id: 'desktop.copy-link', label: '复制链接地址', enabled: true, icon: 'link' },
+    ])
+  })
+
   it('offers one copy action for image contents', () => {
     const items = buildBuiltinContextMenuItems({
       isEditable: false,

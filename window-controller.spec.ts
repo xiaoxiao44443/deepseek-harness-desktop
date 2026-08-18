@@ -383,9 +383,15 @@ describe('WindowController Harness reload', () => {
     })
 
     await vi.waitFor(() => {
-      expect(window.webContents.send.mock.calls.some(([channel]) => channel === 'desktop:context-menu')).toBe(true)
+      const requests = window.webContents.send.mock.calls
+        .filter(([channel]) => channel === 'desktop:context-menu')
+        .map(([, request]) => request)
+      expect(requests.some((request) => request.items.some((item: { id?: string }) => item.id === 'plugin.archive'))).toBe(true)
     })
-    const request = window.webContents.send.mock.calls.find(([channel]) => channel === 'desktop:context-menu')?.[1]
+    const request = window.webContents.send.mock.calls
+      .filter(([channel]) => channel === 'desktop:context-menu')
+      .map(([, request]) => request)
+      .find((request) => request.items.some((item: { id?: string }) => item.id === 'plugin.archive'))
     expect(request).toMatchObject({
       items: expect.arrayContaining([expect.objectContaining({ id: 'plugin.archive', label: '归档' })]),
     })

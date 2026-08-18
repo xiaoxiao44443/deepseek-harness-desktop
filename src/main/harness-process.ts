@@ -67,6 +67,7 @@ export class HarnessProcess extends EventEmitter {
         DSH_DESKTOP_CONTROL_TOKEN: this.desktopBridge.controlToken,
         DSH_DESKTOP_PROFILE_PATH: this.desktopBridge.profilePath,
         DSH_DESKTOP_BRIDGE_ROOT: this.desktopBridge.pluginRootPath,
+        DSH_DESKTOP_BROWSER_ROOT: this.desktopBridge.browserPluginRootPath,
         ELECTRON_RUN_AS_NODE: '1',
         ELECTRON_NO_ATTACH_CONSOLE: '1',
         FORCE_COLOR: '0',

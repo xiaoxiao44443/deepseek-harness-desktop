@@ -9,6 +9,7 @@ export type BuiltinContextMenuAction =
   | 'copy-image'
   | 'paste'
   | 'select-all'
+  | 'open-link-in-browser'
   | 'open-link'
   | 'copy-link'
 
@@ -20,6 +21,7 @@ export const BUILTIN_CONTEXT_MENU_ACTIONS: Readonly<Record<string, BuiltinContex
   'desktop.copy-image': 'copy-image',
   'desktop.paste': 'paste',
   'desktop.select-all': 'select-all',
+  'desktop.open-link-in-browser': 'open-link-in-browser',
   'desktop.open-link': 'open-link',
   'desktop.copy-link': 'copy-link',
 }
@@ -48,14 +50,18 @@ function appendGroup(items: ContextMenuEntry[], group: ContextMenuActionEntry[],
   items.push(...group)
 }
 
-export function buildBuiltinContextMenuItems(snapshot: ContextMenuSnapshot): ContextMenuEntry[] {
+export function buildBuiltinContextMenuItems(
+  snapshot: ContextMenuSnapshot,
+  options: { embeddedBrowserEnabled?: boolean } = {},
+): ContextMenuEntry[] {
   const items: ContextMenuEntry[] = []
   const copyableImage = (snapshot.mediaType === 'image'
       && (snapshot.hasImageContents === true || Boolean(snapshot.srcURL)))
     || snapshot.mediaType === 'canvas'
   if (/^https?:\/\//iu.test(snapshot.linkURL)) {
     appendGroup(items, [
-      action('desktop.open-link', '在浏览器中打开链接', 'external-link', true),
+      action('desktop.open-link-in-browser', '在内置浏览器中打开', 'browser', options.embeddedBrowserEnabled === true),
+      action('desktop.open-link', '在默认浏览器中打开', 'external-link', true),
       action('desktop.copy-link', '复制链接地址', 'link', true),
     ], 'link')
   }

@@ -2,18 +2,20 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { readFile } from 'node:fs/promises'
 import { app, BrowserWindow, clipboard, ipcMain, nativeImage, nativeTheme, shell } from 'electron'
-import type { ContextMenuParams, WebFrameMain } from 'electron'
-import type { ColorTheme, DesktopPlatform, DesktopState, DevelopmentPluginRequest, HarnessLifecycle, PluginInitializationFailure, TitleMenuAction, WindowAction } from '../shared/contracts.js'
+import type { ContextMenuParams, WebContents, WebFrameMain } from 'electron'
+import type { BrowserDisplayMode, BrowserMenuKind, ColorTheme, DesktopApplicationMenuAction, DesktopBrowserMenuAnchor, DesktopBrowserNavigationAction, DesktopBrowserViewBounds, DesktopBrowserViewport, DesktopPlatform, DesktopState, DevelopmentPluginRequest, HarnessLifecycle, PluginInitializationFailure, TitleMenuAction, WindowAction } from '../shared/contracts.js'
 import type { DesktopContextMenuActionRequest, DesktopContextMenuRequest, DesktopPointerInput, PluginContextMenuCollection } from '../shared/context-menu.js'
 import { DESKTOP_CONTEXT_MENU_TRANSPORT_KEY, parsePluginContextMenuCollection } from '../shared/context-menu.js'
 import { RUNTIME_PREPARATION_PROGRESS_EVENT, type HarnessRuntimeManager } from './harness-runtime.js'
 import type { DevelopmentService } from './development-service.js'
 import { parsePluginInitializationFailure, type PluginRecoveryService } from './plugin-recovery.js'
 import { appendPluginContextMenuItems, BUILTIN_CONTEXT_MENU_ACTIONS, buildBuiltinContextMenuItems } from './context-menu.js'
+import { DEFAULT_BROWSER_SETTINGS, type DesktopApplicationMenuState, type DesktopBrowserService } from './desktop-browser.js'
 
 const STATE_CHANNEL = 'desktop:state'
 const CONTEXT_MENU_CHANNEL = 'desktop:context-menu'
 const POINTER_INPUT_CHANNEL = 'desktop:pointer-input'
+const APPLICATION_MENU_ACTION_CHANNEL = 'desktop:application-menu-action'
 const CONTEXT_MENU_TRANSPORT_EXPRESSION = `globalThis[Symbol.for(${JSON.stringify(DESKTOP_CONTEXT_MENU_TRANSPORT_KEY)})]`
 const HARNESS_LOAD_TIMEOUT_MS = 45_000
 const HARNESS_LOAD_PROBE_INTERVAL_MS = 100
@@ -32,6 +34,7 @@ interface PendingHarnessLoad {
 interface PendingDesktopContextMenu {
   requestId: string
   frame: WebFrameMain
+  contents: WebContents
   x: number
   y: number
   linkURL: string
@@ -67,6 +70,7 @@ export class WindowController {
     private readonly runtime: HarnessRuntimeManager,
     private readonly development: DevelopmentService,
     private readonly pluginRecovery?: PluginRecoveryService,
+    private readonly browser?: DesktopBrowserService,
   ) {
     this.runtime.on('update-state', () => this.publishState())
     this.runtime.on(RUNTIME_PREPARATION_PROGRESS_EVENT, (progress: unknown) => {
@@ -80,6 +84,16 @@ export class WindowController {
       this.publishState()
     })
     this.development.on('state', () => this.publishState())
+    this.browser?.on('state', () => this.publishState())
+    this.browser?.on('context-menu', (params: ContextMenuParams, contents: WebContents, source: 'floating' | 'page') => {
+      void this.openBrowserContextMenu(params, contents, source)
+    })
+    this.browser?.on('context-menu-dismiss', (requestId: string) => {
+      void this.dismissContextMenu(requestId, true)
+    })
+    this.browser?.on('application-menu-action', (action: DesktopApplicationMenuAction) => {
+      void this.handleApplicationMenuAction(action)
+    })
   }
 
   async create(): Promise<void> {
@@ -89,6 +103,7 @@ export class WindowController {
     }
 
     this.theme = await this.readConfiguredTheme()
+    this.browser?.setTheme(this.theme)
 
     const developerToolsEnabled = !app.isPackaged || process.argv.includes('--enable-devtools')
     const isMac = process.platform === 'darwin'
@@ -127,6 +142,7 @@ export class WindowController {
       this.stopPluginFailureProbe()
       this.cancelPendingHarnessLoad(new Error('桌面窗口已关闭。'))
       this.pendingContextMenu = undefined
+      this.browser?.detachWindow()
       this.window = undefined
     })
 
@@ -140,10 +156,16 @@ export class WindowController {
     window.webContents.on('before-input-event', (event, input) => {
       const key = input.key.toLowerCase()
       if (key === 'f5' || (key === 'r' && (input.control || input.meta))) event.preventDefault()
+      if (input.alt || input.meta || key === 'alt' || key === 'meta' || key === 'os' || key === 'super') {
+        const contextRequestId = this.browser?.closeMenu()
+        if (contextRequestId !== undefined) void this.dismissContextMenu(contextRequestId, false)
+      }
     })
     window.webContents.on('before-mouse-event', (_event, input) => {
       if (input.type !== 'mouseDown') return
       if (input.button !== 'left' && input.button !== 'middle' && input.button !== 'right') return
+      const contextRequestId = this.browser?.closeMenu()
+      if (contextRequestId !== undefined) void this.dismissContextMenu(contextRequestId, true)
       const pointer: DesktopPointerInput = {
         x: Math.round(input.x),
         y: Math.round(input.y),
@@ -197,6 +219,7 @@ export class WindowController {
         query: { theme: this.theme, platform },
       })
     }
+    await this.browser?.attachWindow(window)
     window.show()
     this.publishState()
   }
@@ -324,12 +347,83 @@ export class WindowController {
     ipcMain.handle('desktop:plugin-recovery-disable', async () => await this.recoverFailedPlugin())
     ipcMain.handle('desktop:plugin-recovery-restore', async (_event, entryId: string) => await this.restoreRecoveredPlugin(entryId))
     ipcMain.handle('desktop:development-run-plugin', (_event, request: DevelopmentPluginRequest) => this.development.runPlugin(request))
-    ipcMain.handle('desktop:context-menu-select', async (event, request: DesktopContextMenuActionRequest) => {
+    ipcMain.handle('desktop:browser-panel-open', async (event, open: boolean) => {
+      if (event.sender !== this.window?.webContents || typeof open !== 'boolean') return
+      await this.browser?.setPanelOpen(open)
+    })
+    ipcMain.handle('desktop:browser-display-mode', async (event, mode: BrowserDisplayMode) => {
       if (event.sender !== this.window?.webContents) return
+      await this.browser?.setDisplayMode(mode)
+    })
+    ipcMain.handle('desktop:browser-open-menu', async (event, kind: BrowserMenuKind, anchor: DesktopBrowserMenuAnchor) => {
+      if (event.sender !== this.window?.webContents) return
+      const applicationState: DesktopApplicationMenuState | undefined = kind === 'application'
+        ? {
+            appVersion: app.getVersion(),
+            ...(this.harnessVersion === undefined ? {} : { harnessVersion: this.harnessVersion }),
+            updateStatus: this.runtime.updateState.status,
+            ...(this.runtime.updateState.version === undefined ? {} : { updateVersion: this.runtime.updateState.version }),
+            patchEnabled: Boolean(this.development.state.patchPath),
+          }
+        : undefined
+      await this.browser?.openPageMenu(kind, anchor, applicationState)
+    })
+    ipcMain.handle('desktop:browser-zoom-factor', async (event, factor: number) => {
+      if (event.sender !== this.window?.webContents) return
+      await this.browser?.setZoomFactor(factor)
+    })
+    ipcMain.handle('desktop:browser-device-viewport', async (event, viewport: DesktopBrowserViewport | null) => {
+      if (event.sender !== this.window?.webContents) return
+      await this.browser?.setDeviceViewport(viewport)
+    })
+    ipcMain.handle('desktop:browser-device-preview', async (event, viewport: DesktopBrowserViewport) => {
+      if (event.sender !== this.window?.webContents) return
+      await this.browser?.previewDeviceViewport(viewport)
+    })
+    ipcMain.handle('desktop:browser-view-bounds', async (event, bounds: DesktopBrowserViewBounds | null) => {
+      if (event.sender !== this.window?.webContents) return
+      await this.browser?.setViewBounds(bounds)
+    })
+    ipcMain.handle('desktop:browser-shell-snapshot', async (event) => {
+      if (event.sender !== this.window?.webContents) return
+      return await this.browser?.refreshShellSnapshot()
+    })
+    ipcMain.handle('desktop:browser-shell-overlay', async (event, bounds: DesktopBrowserViewBounds | null) => {
+      if (event.sender !== this.window?.webContents) return
+      return await this.browser?.setShellOverlay(bounds)
+    })
+    ipcMain.handle('desktop:browser-shell-overlay-commit', async (event) => {
+      if (event.sender !== this.window?.webContents) return
+      this.browser?.commitShellOverlay()
+    })
+    ipcMain.handle('desktop:browser-navigate', async (event, value: string) => {
+      if (event.sender !== this.window?.webContents || typeof value !== 'string') return
+      await this.browser?.navigate(value)
+    })
+    ipcMain.handle('desktop:browser-navigation-action', async (event, action: DesktopBrowserNavigationAction) => {
+      if (event.sender !== this.window?.webContents) return
+      await this.browser?.navigationAction(action)
+    })
+    ipcMain.handle('desktop:browser-history', (event) => {
+      if (event.sender !== this.window?.webContents) return []
+      return this.browser?.getHistory() ?? []
+    })
+    ipcMain.handle('desktop:browser-clear-history', async (event) => {
+      if (event.sender !== this.window?.webContents) return
+      await this.browser?.clearHistory()
+    })
+    ipcMain.handle('desktop:browser-clear-data', async (event) => {
+      if (event.sender !== this.window?.webContents) return
+      await this.browser?.clearBrowsingData()
+    })
+    ipcMain.handle('desktop:context-menu-select', async (event, request: DesktopContextMenuActionRequest) => {
+      if (event.sender !== this.window?.webContents && this.browser?.ownsMenuWebContents(event.sender) !== true) return
+      this.browser?.closeMenu()
       await this.selectContextMenuItem(request)
     })
     ipcMain.handle('desktop:context-menu-dismiss', async (event, requestId: string, restoreFocus: boolean) => {
-      if (event.sender !== this.window?.webContents) return
+      if (event.sender !== this.window?.webContents && this.browser?.ownsMenuWebContents(event.sender) !== true) return
+      this.browser?.closeMenu()
       await this.dismissContextMenu(requestId, restoreFocus !== false)
     })
   }
@@ -362,24 +456,50 @@ export class WindowController {
   private async openContextMenu(params: ContextMenuParams): Promise<void> {
     const frame = params.frame
     if (frame === null || !this.isSupportedContextMenu(params)) return
+    const window = this.window
+    if (window === undefined || window.isDestroyed() || window.webContents.isLoadingMainFrame()) return
     const harnessContext = this.isHarnessFrame(frame)
     const sequence = ++this.contextMenuSequence
     const previous = this.pendingContextMenu
     this.pendingContextMenu = undefined
     if (previous !== undefined) void this.releasePluginContextMenu(previous, false)
 
-    const builtins = buildBuiltinContextMenuItems(params)
-    const pluginCollection = harnessContext ? await this.collectPluginContextMenu(frame) : undefined
+    const builtins = buildBuiltinContextMenuItems(params, {
+      embeddedBrowserEnabled: this.browser?.state.settings.enabled === true,
+    })
+    const pluginCollectionPromise = harnessContext
+      ? this.collectPluginContextMenu(frame)
+      : Promise.resolve(undefined)
+
+    if (
+      builtins.some((entry) => entry.kind === 'item')
+      && sequence === this.contextMenuSequence
+      && (this.isShellFrame(frame) || this.isHarnessFrame(frame))
+    ) {
+      const requestId = `menu-${Date.now().toString(36)}-${sequence.toString(36)}`
+      this.pendingContextMenu = {
+        requestId,
+        frame,
+        contents: window.webContents,
+        x: params.x,
+        y: params.y,
+        linkURL: params.linkURL,
+        srcURL: params.srcURL,
+        selectionText: params.selectionText,
+        allowedItemIds: new Set(builtins.flatMap((entry) => entry.kind === 'item' && entry.enabled ? [entry.id] : [])),
+      }
+      const request: DesktopContextMenuRequest = { requestId, x: params.x, y: params.y, items: builtins }
+      window.webContents.send(CONTEXT_MENU_CHANNEL, request)
+      void pluginCollectionPromise.then((pluginCollection) => {
+        this.updateOpenContextMenuWithPlugins(sequence, requestId, frame, builtins, pluginCollection)
+      })
+      return
+    }
+
+    const pluginCollection = await pluginCollectionPromise
     if (sequence !== this.contextMenuSequence || (!this.isShellFrame(frame) && !this.isHarnessFrame(frame))) {
       if (pluginCollection !== undefined) void this.releasePluginContextMenu({
-        requestId: '',
         frame,
-        x: 0,
-        y: 0,
-        linkURL: '',
-        srcURL: '',
-        selectionText: '',
-        allowedItemIds: new Set(),
         pluginToken: pluginCollection.token,
       }, false)
       return
@@ -391,6 +511,7 @@ export class WindowController {
     this.pendingContextMenu = {
       requestId,
       frame,
+      contents: window.webContents,
       x: params.x,
       y: params.y,
       linkURL: params.linkURL,
@@ -405,9 +526,70 @@ export class WindowController {
       y: params.y,
       items,
     }
-    const window = this.window
-    if (window === undefined || window.isDestroyed() || window.webContents.isLoadingMainFrame()) return
     window.webContents.send(CONTEXT_MENU_CHANNEL, request)
+  }
+
+  private updateOpenContextMenuWithPlugins(
+    sequence: number,
+    requestId: string,
+    frame: WebFrameMain,
+    builtins: DesktopContextMenuRequest['items'],
+    pluginCollection: PluginContextMenuCollection | undefined,
+  ): void {
+    if (pluginCollection === undefined) return
+    const pending = this.pendingContextMenu
+    if (
+      pending === undefined
+      || pending.requestId !== requestId
+      || sequence !== this.contextMenuSequence
+      || frame.isDestroyed()
+    ) {
+      void this.releasePluginContextMenu({ frame, pluginToken: pluginCollection.token }, false)
+      return
+    }
+    const items = appendPluginContextMenuItems(builtins, pluginCollection.items)
+    pending.allowedItemIds = new Set(items.flatMap((entry) => entry.kind === 'item' && entry.enabled ? [entry.id] : []))
+    pending.pluginToken = pluginCollection.token
+    this.window?.webContents.send(CONTEXT_MENU_CHANNEL, {
+      requestId,
+      x: pending.x,
+      y: pending.y,
+      items,
+    } satisfies DesktopContextMenuRequest)
+  }
+
+  private async openBrowserContextMenu(
+    params: ContextMenuParams,
+    contents: WebContents,
+    source: 'floating' | 'page',
+  ): Promise<void> {
+    const frame = params.frame
+    if (frame === null || contents.isDestroyed()) return
+    const sequence = ++this.contextMenuSequence
+    const previous = this.pendingContextMenu
+    this.pendingContextMenu = undefined
+    if (previous !== undefined) void this.releasePluginContextMenu(previous, false)
+
+    const items = buildBuiltinContextMenuItems(params, { embeddedBrowserEnabled: true })
+      .filter((entry) => entry.kind === 'separator' || entry.id !== 'desktop.open-link-in-browser')
+    while (items[0]?.kind === 'separator') items.shift()
+    while (items.at(-1)?.kind === 'separator') items.pop()
+    if (!items.some((entry) => entry.kind === 'item')) return
+
+    const requestId = `menu-${Date.now().toString(36)}-${sequence.toString(36)}`
+    this.pendingContextMenu = {
+      requestId,
+      frame,
+      contents,
+      x: params.x,
+      y: params.y,
+      linkURL: params.linkURL,
+      srcURL: params.srcURL,
+      selectionText: params.selectionText,
+      allowedItemIds: new Set(items.flatMap((entry) => entry.kind === 'item' && entry.enabled ? [entry.id] : [])),
+    }
+    const request: DesktopContextMenuRequest = { requestId, x: params.x, y: params.y, items }
+    if (await this.browser?.openContextMenu(request, source) !== true) this.pendingContextMenu = undefined
   }
 
   private async collectPluginContextMenu(frame: WebFrameMain): Promise<PluginContextMenuCollection | undefined> {
@@ -450,6 +632,13 @@ export class WindowController {
     pending: PendingDesktopContextMenu,
     action: (typeof BUILTIN_CONTEXT_MENU_ACTIONS)[string],
   ): Promise<void> {
+    if (action === 'open-link-in-browser') {
+      if (/^https?:\/\//iu.test(pending.linkURL) && this.browser?.state.settings.enabled === true) {
+        await this.browser.setPanelOpen(true)
+        await this.browser.navigate(pending.linkURL, false)
+      }
+      return
+    }
     if (action === 'open-link') {
       if (/^https?:\/\//iu.test(pending.linkURL)) await shell.openExternal(pending.linkURL)
       return
@@ -461,8 +650,7 @@ export class WindowController {
     if (action === 'copy-image') {
       if (await this.copyContextMenuImage(pending)) return
       await new Promise((resolve) => setTimeout(resolve, 16))
-      const contents = this.window?.webContents
-      if (contents !== undefined && !contents.isDestroyed()) contents.copyImageAt(pending.x, pending.y)
+      if (!pending.contents.isDestroyed()) pending.contents.copyImageAt(pending.x, pending.y)
       return
     }
     if (pending.frame.isDestroyed()) return
@@ -482,8 +670,8 @@ export class WindowController {
     }
     if (executed) return
 
-    const contents = this.window?.webContents
-    if (contents === undefined || contents.isDestroyed()) return
+    const contents = pending.contents
+    if (contents.isDestroyed()) return
     if (action === 'undo') contents.undo()
     else if (action === 'redo') contents.redo()
     else if (action === 'cut') contents.cut()
@@ -549,7 +737,10 @@ export class WindowController {
     })()`).catch(() => undefined)
   }
 
-  private async releasePluginContextMenu(pending: PendingDesktopContextMenu, restoreFocus: boolean): Promise<void> {
+  private async releasePluginContextMenu(
+    pending: Pick<PendingDesktopContextMenu, 'frame' | 'pluginToken'>,
+    restoreFocus: boolean,
+  ): Promise<void> {
     const token = pending.pluginToken
     if (token === undefined || pending.frame.isDestroyed()) return
     await pending.frame.executeJavaScript(
@@ -604,6 +795,17 @@ export class WindowController {
     }
   }
 
+  private async handleApplicationMenuAction(action: DesktopApplicationMenuAction): Promise<void> {
+    if (action === 'update') {
+      await this.titleMenuAction('update')
+      return
+    }
+    await this.browser?.setPanelOpen(false)
+    const window = this.window
+    if (window === undefined || window.isDestroyed() || window.webContents.isDestroyed()) return
+    window.webContents.send(APPLICATION_MENU_ACTION_CHANNEL, action)
+  }
+
   private getState(): DesktopState {
     const update = this.runtime.updateState
     return {
@@ -624,6 +826,16 @@ export class WindowController {
       ...(update.version !== undefined ? { updateVersion: update.version } : {}),
       ...(update.message !== undefined ? { updateMessage: update.message } : {}),
       development: this.development.state,
+      browser: this.browser?.state ?? {
+        settings: { ...DEFAULT_BROWSER_SETTINGS },
+        panelOpen: false,
+        loading: false,
+        url: '',
+        title: '浏览器',
+        canGoBack: false,
+        canGoForward: false,
+        zoomFactor: 1,
+      },
       isMaximized: this.window?.isMaximized() ?? false,
     }
   }
@@ -778,6 +990,7 @@ export class WindowController {
         })()`) as ColorTheme
         if ((theme === 'dark' || theme === 'light') && theme !== this.theme) {
           this.theme = theme
+          this.browser?.setTheme(theme)
           this.publishState()
         }
       } catch {

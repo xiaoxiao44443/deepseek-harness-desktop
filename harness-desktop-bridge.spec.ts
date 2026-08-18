@@ -23,12 +23,23 @@ describe('HarnessDesktopBridgeHost', () => {
       updateSettings: vi.fn(async (value: unknown) => value),
       show: vi.fn(async () => true),
     }
+    const browser = {
+      state: { settings: { enabled: true, agentOpenMode: 'background' } },
+      updateSettings: vi.fn(async (value: unknown) => value),
+      getHistory: vi.fn(() => []),
+      clearHistory: vi.fn(async () => undefined),
+      clearBrowsingData: vi.fn(async () => undefined),
+      handleAgentRequest: vi.fn(async () => ({ ok: true })),
+    }
     const host = new HarnessDesktopBridgeHost({
       userDataPath,
       pluginName: 'dsh-desktop-bridge',
       pluginRootPath: '/private/example/resources/dsh-desktop-bridge',
+      browserPluginName: 'dsh-desktop-browser',
+      browserPluginRootPath: '/private/example/resources/dsh-desktop-browser',
       profilePath: '/private/example/.dsh/profiles/web',
       notifications: notifications as never,
+      browser: browser as never,
       restartHarness,
       restartDelayMs: 5,
     })
@@ -42,9 +53,13 @@ describe('HarnessDesktopBridgeHost', () => {
       insert: [{
         id: 'desktop-bridge',
         name: 'dsh-desktop-bridge',
+      }, {
+        id: 'desktop-browser',
+        name: 'dsh-desktop-browser',
       }],
     }])
     expect(launch.pluginRootPath).toBe('/private/example/resources/dsh-desktop-bridge')
+    expect(launch.browserPluginRootPath).toBe('/private/example/resources/dsh-desktop-browser')
 
     const denied = await fetch(launch.controlUrl, { method: 'POST' })
     expect(denied.status).toBe(401)
@@ -93,6 +108,23 @@ describe('HarnessDesktopBridgeHost', () => {
     })
     expect(shown.status).toBe(200)
     expect(notifications.show).toHaveBeenCalledWith({ kind: 'question', sessionId: 'session-1' })
+
+    const browserSettings = await fetch(`${controlOrigin}/v1/browser/settings`, {
+      headers: { authorization: `Bearer ${launch.controlToken}` },
+    })
+    expect(browserSettings.status).toBe(200)
+    await expect(browserSettings.json()).resolves.toEqual({ settings: browser.state.settings })
+
+    const browserAction = await fetch(`${controlOrigin}/v1/browser/action`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${launch.controlToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ action: 'snapshot' }),
+    })
+    expect(browserAction.status).toBe(200)
+    expect(browser.handleAgentRequest).toHaveBeenCalledWith({ action: 'snapshot' })
 
   })
 })

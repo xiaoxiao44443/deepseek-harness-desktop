@@ -3,9 +3,10 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { mkdir, writeFile } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
 import type { DesktopNotificationService } from './desktop-notifications.js'
+import type { DesktopBrowserService } from './desktop-browser.js'
 
 const CONTROL_HOST = '127.0.0.1'
-const MAX_REQUEST_BYTES = 16_384
+const MAX_REQUEST_BYTES = 65_536
 const DEFAULT_RESTART_DELAY_MS = 1_500
 
 export interface HarnessDesktopBridgeLaunch {
@@ -14,14 +15,18 @@ export interface HarnessDesktopBridgeLaunch {
   controlToken: string
   profilePath: string
   pluginRootPath: string
+  browserPluginRootPath: string
 }
 
 export interface HarnessDesktopBridgeOptions {
   userDataPath: string
   pluginName: string
   pluginRootPath: string
+  browserPluginName: string
+  browserPluginRootPath: string
   profilePath: string
   notifications: DesktopNotificationService
+  browser: DesktopBrowserService
   restartHarness(reason: string): Promise<void>
   restartDelayMs?: number
 }
@@ -42,8 +47,12 @@ export class HarnessDesktopBridgeHost {
   async start(): Promise<HarnessDesktopBridgeLaunch> {
     if (this.launch !== undefined) return { ...this.launch }
     if (!isAbsolute(this.options.pluginRootPath)) throw new Error('Desktop bridge plugin root path must be absolute')
+    if (!isAbsolute(this.options.browserPluginRootPath)) throw new Error('Desktop browser plugin root path must be absolute')
     if (this.options.pluginName.trim().length === 0 || /[\r\n\0]/u.test(this.options.pluginName)) {
       throw new Error('Desktop bridge plugin name is invalid')
+    }
+    if (this.options.browserPluginName.trim().length === 0 || /[\r\n\0]/u.test(this.options.browserPluginName)) {
+      throw new Error('Desktop browser plugin name is invalid')
     }
 
     const patchPath = join(this.options.userDataPath, 'desktop-bridge.patch.json')
@@ -52,6 +61,7 @@ export class HarnessDesktopBridgeHost {
       {
         insert: [
           { id: 'desktop-bridge', name: this.options.pluginName },
+          { id: 'desktop-browser', name: this.options.browserPluginName },
         ],
       },
     ], null, 2)}\n`, 'utf8')
@@ -96,6 +106,7 @@ export class HarnessDesktopBridgeHost {
       controlToken,
       profilePath: this.options.profilePath,
       pluginRootPath: this.options.pluginRootPath,
+      browserPluginRootPath: this.options.browserPluginRootPath,
     }
     return { ...this.launch }
   }
@@ -120,6 +131,10 @@ export class HarnessDesktopBridgeHost {
     const supported = pathname === '/v1/restart-harness'
       || pathname === '/v1/notifications/settings'
       || pathname === '/v1/notifications/show'
+      || pathname === '/v1/browser/settings'
+      || pathname === '/v1/browser/history'
+      || pathname === '/v1/browser/clear-data'
+      || pathname === '/v1/browser/action'
     if (!supported) {
       this.sendJson(response, 404, { accepted: false, message: 'Not found' })
       return
@@ -152,6 +167,58 @@ export class HarnessDesktopBridgeHost {
       }
       const shown = await this.options.notifications.show(await this.readJsonBody(request))
       this.sendJson(response, 200, { shown })
+      return
+    }
+
+    if (pathname === '/v1/browser/settings') {
+      if (request.method === 'GET') {
+        this.sendJson(response, 200, { settings: this.options.browser.state.settings })
+        return
+      }
+      if (request.method === 'PUT') {
+        const settings = await this.options.browser.updateSettings(await this.readJsonBody(request))
+        this.sendJson(response, 200, { settings })
+        return
+      }
+      response.setHeader('allow', 'GET, PUT')
+      this.sendJson(response, 405, { accepted: false, message: 'Method not allowed' })
+      return
+    }
+
+    if (pathname === '/v1/browser/history') {
+      if (request.method === 'GET') {
+        this.sendJson(response, 200, { entries: this.options.browser.getHistory() })
+        return
+      }
+      if (request.method === 'DELETE') {
+        await this.options.browser.clearHistory()
+        this.sendJson(response, 200, { cleared: true })
+        return
+      }
+      response.setHeader('allow', 'GET, DELETE')
+      this.sendJson(response, 405, { accepted: false, message: 'Method not allowed' })
+      return
+    }
+
+    if (pathname === '/v1/browser/clear-data') {
+      if (request.method !== 'POST') {
+        response.setHeader('allow', 'POST')
+        this.sendJson(response, 405, { accepted: false, message: 'Method not allowed' })
+        return
+      }
+      await this.options.browser.clearBrowsingData()
+      this.sendJson(response, 200, { cleared: true })
+      return
+    }
+
+    if (pathname === '/v1/browser/action') {
+      if (request.method !== 'POST') {
+        response.setHeader('allow', 'POST')
+        this.sendJson(response, 405, { accepted: false, message: 'Method not allowed' })
+        return
+      }
+      const result = await this.options.browser.handleAgentRequest(await this.readJsonBody(request))
+      this.sendJson(response, 200, result)
       return
     }
 

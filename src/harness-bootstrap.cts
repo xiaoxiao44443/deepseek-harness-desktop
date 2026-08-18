@@ -8,6 +8,7 @@ const electronExecutable = process.execPath.toLowerCase()
 const originalSpawn = childProcess.spawn
 const directoryPickerWorkerShim = join(__dirname, 'directory-picker-worker.cjs')
 const DESKTOP_BRIDGE_PACKAGE = 'dsh-desktop-bridge'
+const DESKTOP_BROWSER_PACKAGE = 'dsh-desktop-browser'
 
 interface KoffiLibrary {
   func(declaration: string): (...args: unknown[]) => unknown
@@ -90,14 +91,19 @@ syncBuiltinESMExports()
  * avoiding any mutation of the user's Profile dependencies.
  */
 function registerDesktopBridgeResolver(): void {
-  const root = process.env.DSH_DESKTOP_BRIDGE_ROOT
-  if (root === undefined) return
-  if (!isAbsolute(root)) throw new Error('DSH_DESKTOP_BRIDGE_ROOT must be absolute')
-  const entries = new Map<string, string>([
-    [DESKTOP_BRIDGE_PACKAGE, join(root, 'lib', 'index.js')],
-    [`${DESKTOP_BRIDGE_PACKAGE}/client`, join(root, 'lib', 'client.js')],
-    [`${DESKTOP_BRIDGE_PACKAGE}/package.json`, join(root, 'package.json')],
-  ])
+  const roots = [
+    [DESKTOP_BRIDGE_PACKAGE, process.env.DSH_DESKTOP_BRIDGE_ROOT],
+    [DESKTOP_BROWSER_PACKAGE, process.env.DSH_DESKTOP_BROWSER_ROOT],
+  ] as const
+  const entries = new Map<string, string>()
+  for (const [packageName, root] of roots) {
+    if (root === undefined) continue
+    if (!isAbsolute(root)) throw new Error(`${packageName} root must be absolute`)
+    entries.set(packageName, join(root, 'lib', 'index.js'))
+    entries.set(`${packageName}/client`, join(root, 'lib', 'client.js'))
+    entries.set(`${packageName}/package.json`, join(root, 'package.json'))
+  }
+  if (entries.size === 0) return
   registerHooks({
     resolve(specifier, context, nextResolve) {
       const entry = entries.get(specifier)
