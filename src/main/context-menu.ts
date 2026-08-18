@@ -25,7 +25,7 @@ export const BUILTIN_CONTEXT_MENU_ACTIONS: Readonly<Record<string, BuiltinContex
 }
 
 type ContextMenuSnapshot = Pick<ContextMenuParams, 'isEditable' | 'selectionText' | 'linkURL' | 'editFlags'>
-  & Partial<Pick<ContextMenuParams, 'mediaType' | 'hasImageContents'>>
+  & Partial<Pick<ContextMenuParams, 'mediaType' | 'hasImageContents' | 'srcURL'>>
 
 function action(
   id: string,
@@ -50,7 +50,8 @@ function appendGroup(items: ContextMenuEntry[], group: ContextMenuActionEntry[],
 
 export function buildBuiltinContextMenuItems(snapshot: ContextMenuSnapshot): ContextMenuEntry[] {
   const items: ContextMenuEntry[] = []
-  const copyableImage = (snapshot.mediaType === 'image' && snapshot.hasImageContents === true)
+  const copyableImage = (snapshot.mediaType === 'image'
+      && (snapshot.hasImageContents === true || Boolean(snapshot.srcURL)))
     || snapshot.mediaType === 'canvas'
   if (/^https?:\/\//iu.test(snapshot.linkURL)) {
     appendGroup(items, [

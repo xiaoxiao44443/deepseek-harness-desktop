@@ -97,6 +97,32 @@ describe('desktop context menu protocol', () => {
       linkURL: '',
       mediaType: 'image',
       hasImageContents: true,
+      srcURL: 'blob:http://127.0.0.1/image-preview',
+      editFlags: {
+        canUndo: false,
+        canRedo: false,
+        canCut: false,
+        canCopy: false,
+        canPaste: false,
+        canDelete: false,
+        canSelectAll: true,
+        canEditRichly: false,
+      },
+    })
+
+    expect(items.filter((entry) => entry.kind === 'item')).toEqual([
+      { kind: 'item', id: 'desktop.copy-image', label: '复制', enabled: true, icon: 'copy' },
+    ])
+  })
+
+  it('offers image copy when Chromium provides a source before decoded contents', () => {
+    const items = buildBuiltinContextMenuItems({
+      isEditable: false,
+      selectionText: '',
+      linkURL: '',
+      mediaType: 'image',
+      hasImageContents: false,
+      srcURL: 'blob:http://127.0.0.1/composer-preview',
       editFlags: {
         canUndo: false,
         canRedo: false,

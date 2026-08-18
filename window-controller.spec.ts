@@ -2,7 +2,10 @@ import { EventEmitter } from 'node:events'
 import { describe, expect, it, vi } from 'vitest'
 
 const electronMocks = vi.hoisted(() => ({
+  clipboardImage: { isEmpty: () => false },
+  clipboardWriteImage: vi.fn(),
   clipboardWriteText: vi.fn(),
+  nativeImageCreateFromDataURL: vi.fn(),
   ipcHandlers: new Map<string, (...args: unknown[]) => unknown>(),
   window: undefined as undefined | {
     webContents: EventEmitter & {
@@ -71,13 +74,19 @@ vi.mock('electron', async () => {
       getVersion: () => '0.1.0',
     },
     BrowserWindow: MockBrowserWindow,
-    clipboard: { writeText: electronMocks.clipboardWriteText },
+    clipboard: {
+      writeImage: electronMocks.clipboardWriteImage,
+      writeText: electronMocks.clipboardWriteText,
+    },
     ipcMain: {
       handle: vi.fn((channel: string, handler: (...args: unknown[]) => unknown) => {
         electronMocks.ipcHandlers.set(channel, handler)
       }),
     },
     nativeTheme: { shouldUseDarkColors: true },
+    nativeImage: {
+      createFromDataURL: electronMocks.nativeImageCreateFromDataURL.mockReturnValue(electronMocks.clipboardImage),
+    },
     shell: { openExternal: vi.fn() },
   }
 })
@@ -219,7 +228,11 @@ describe('WindowController Harness reload', () => {
       name: 'harness-frame',
       url,
       isDestroyed: () => false,
-      executeJavaScript: vi.fn(async (script: string) => script === 'document.readyState' ? 'complete' : null),
+      executeJavaScript: vi.fn(async (script: string) => {
+        if (script === 'document.readyState') return 'complete'
+        if (script.includes("canvas.toDataURL('image/png')")) return 'data:image/png;base64,Y29waWVkLWltYWdl'
+        return null
+      }),
     }
     const window = electronMocks.window
     expect(window).toBeDefined()
@@ -273,6 +286,7 @@ describe('WindowController Harness reload', () => {
       frame,
       frameURL: url,
       linkURL: '',
+      srcURL: 'blob:http://127.0.0.1:43213/composer-preview',
       selectionText: '',
       mediaType: 'image',
       hasImageContents: true,
@@ -298,7 +312,14 @@ describe('WindowController Harness reload', () => {
     if (select !== undefined && window !== undefined && imageRequest !== undefined) {
       await select({ sender: window.webContents }, { requestId: imageRequest.requestId, itemId: 'desktop.copy-image' })
     }
-    expect(window?.webContents.copyImageAt).toHaveBeenCalledWith(96, 128)
+    expect(frame.executeJavaScript).toHaveBeenCalledWith(expect.stringContaining(
+      'blob:http://127.0.0.1:43213/composer-preview',
+    ))
+    expect(electronMocks.nativeImageCreateFromDataURL).toHaveBeenCalledWith(
+      'data:image/png;base64,Y29waWVkLWltYWdl',
+    )
+    expect(electronMocks.clipboardWriteImage).toHaveBeenCalledWith(electronMocks.clipboardImage)
+    expect(window?.webContents.copyImageAt).not.toHaveBeenCalled()
   })
 
   it('routes Cordis menu contributions through the internal Electron transport', async () => {

@@ -1,7 +1,7 @@
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { readFile } from 'node:fs/promises'
-import { app, BrowserWindow, clipboard, ipcMain, nativeTheme, shell } from 'electron'
+import { app, BrowserWindow, clipboard, ipcMain, nativeImage, nativeTheme, shell } from 'electron'
 import type { ContextMenuParams, WebFrameMain } from 'electron'
 import type { ColorTheme, DesktopPlatform, DesktopState, DevelopmentPluginRequest, HarnessLifecycle, PluginInitializationFailure, TitleMenuAction, WindowAction } from '../shared/contracts.js'
 import type { DesktopContextMenuActionRequest, DesktopContextMenuRequest, DesktopPointerInput, PluginContextMenuCollection } from '../shared/context-menu.js'
@@ -19,6 +19,7 @@ const HARNESS_LOAD_TIMEOUT_MS = 45_000
 const HARNESS_LOAD_PROBE_INTERVAL_MS = 100
 const HARNESS_LOAD_READY_FALLBACK_MS = 3_000
 const HARNESS_CHANGES_URL = 'https://github.com/deepseek-ai/deepseek-harness/commits/master/'
+const MAX_CLIPBOARD_IMAGE_PIXELS = 100_000_000
 
 interface PendingHarnessLoad {
   url: string
@@ -34,6 +35,7 @@ interface PendingDesktopContextMenu {
   x: number
   y: number
   linkURL: string
+  srcURL: string
   selectionText: string
   allowedItemIds: Set<string>
   pluginToken?: string
@@ -375,6 +377,7 @@ export class WindowController {
         x: 0,
         y: 0,
         linkURL: '',
+        srcURL: '',
         selectionText: '',
         allowedItemIds: new Set(),
         pluginToken: pluginCollection.token,
@@ -391,6 +394,7 @@ export class WindowController {
       x: params.x,
       y: params.y,
       linkURL: params.linkURL,
+      srcURL: params.srcURL,
       selectionText: params.selectionText,
       allowedItemIds: new Set(items.flatMap((entry) => entry.kind === 'item' && entry.enabled ? [entry.id] : [])),
       ...(pluginCollection === undefined ? {} : { pluginToken: pluginCollection.token }),
@@ -455,6 +459,7 @@ export class WindowController {
       return
     }
     if (action === 'copy-image') {
+      if (await this.copyContextMenuImage(pending)) return
       await new Promise((resolve) => setTimeout(resolve, 16))
       const contents = this.window?.webContents
       if (contents !== undefined && !contents.isDestroyed()) contents.copyImageAt(pending.x, pending.y)
@@ -487,6 +492,44 @@ export class WindowController {
       else contents.copy()
     } else if (action === 'paste') contents.paste()
     else if (action === 'select-all') contents.selectAll()
+  }
+
+  private async copyContextMenuImage(pending: PendingDesktopContextMenu): Promise<boolean> {
+    if (pending.srcURL.length === 0 || pending.frame.isDestroyed()) return false
+    try {
+      const dataURL = await pending.frame.executeJavaScript(`(async () => {
+        const response = await fetch(${JSON.stringify(pending.srcURL)})
+        if (!response.ok) throw new Error('Unable to read image')
+        const blob = await response.blob()
+        const objectURL = URL.createObjectURL(blob)
+        try {
+          const image = document.createElement('img')
+          image.src = objectURL
+          await image.decode()
+          const width = image.naturalWidth
+          const height = image.naturalHeight
+          if (width < 1 || height < 1 || width * height > ${MAX_CLIPBOARD_IMAGE_PIXELS}) return null
+          const canvas = document.createElement('canvas')
+          canvas.width = width
+          canvas.height = height
+          const context = canvas.getContext('2d')
+          if (context === null) return null
+          context.drawImage(image, 0, 0)
+          return canvas.toDataURL('image/png')
+        } finally {
+          URL.revokeObjectURL(objectURL)
+        }
+      })()`)
+      if (typeof dataURL !== 'string' || !dataURL.startsWith('data:image/png;base64,')) return false
+      const image = nativeImage.createFromDataURL(dataURL)
+      if (image.isEmpty()) return false
+      clipboard.writeImage(image)
+      return true
+    } catch {
+      // Remote images without CORS access and frames that navigate while the
+      // menu is open still get Electron's coordinate-based fallback.
+      return false
+    }
   }
 
   private async executePluginContextMenuItem(pending: PendingDesktopContextMenu, itemId: string): Promise<void> {
