@@ -30,6 +30,7 @@ describe('HarnessDesktopBridgeHost', () => {
       clearHistory: vi.fn(async () => undefined),
       clearBrowsingData: vi.fn(async () => undefined),
       handleAgentRequest: vi.fn(async () => ({ ok: true })),
+      updateAgentStatus: vi.fn(),
     }
     const host = new HarnessDesktopBridgeHost({
       userDataPath,
@@ -121,10 +122,21 @@ describe('HarnessDesktopBridgeHost', () => {
         authorization: `Bearer ${launch.controlToken}`,
         'content-type': 'application/json',
       },
-      body: JSON.stringify({ action: 'snapshot' }),
+      body: JSON.stringify({ action: 'snapshot', sessionId: 'session-1' }),
     })
     expect(browserAction.status).toBe(200)
-    expect(browser.handleAgentRequest).toHaveBeenCalledWith({ action: 'snapshot' })
+    expect(browser.handleAgentRequest).toHaveBeenCalledWith({ action: 'snapshot', sessionId: 'session-1' })
+
+    const browserAgentStatus = await fetch(`${controlOrigin}/v1/browser/agent-status`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${launch.controlToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ sessionId: 'session-1', status: 'running' }),
+    })
+    expect(browserAgentStatus.status).toBe(200)
+    expect(browser.updateAgentStatus).toHaveBeenCalledWith({ sessionId: 'session-1', status: 'running' })
 
   })
 })

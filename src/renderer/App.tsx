@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowRight, Check, ChevronDown, Code2, Columns2, Copy, Globe2, History, Maximize2, Minimize2, Minus, MonitorSmartphone, MoreVertical, PanelRight, PanelRightClose, PanelRightOpen, Plus, RotateCw, Square, TabletSmartphone, Trash2, X } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Check, ChevronDown, Code2, Columns2, Copy, Globe2, History, Maximize2, Minimize2, Minus, MonitorSmartphone, MoreVertical, PanelRight, Plus, RotateCw, Square, TabletSmartphone, Trash2, X } from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { BrowserDisplayMode, DesktopApplicationMenuAction, DesktopBrowserHistoryEntry, DesktopBrowserShellSnapshot, DesktopBrowserViewport, DesktopState, DevelopmentState, PluginRecoveryEntry, TitleMenuAction } from '../shared/contracts.js'
@@ -25,6 +25,18 @@ interface BrowserShellSnapshotImage {
 
 function FloatingWindowIcon(): ReactNode {
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 9V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v10c0 1.1.9 2 2 2h4" /><rect width="10" height="7" x="12" y="13" rx="2" /></svg>
+}
+
+function BrowserPanelIcon({ open }: { open: boolean }): ReactNode {
+  return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="3.5" />{open ? <path d="M14.5 4.5v15" strokeLinecap="square" /> : <path d="M17.25 8.5v7" />}</svg>
+}
+
+function AgentPointerIcon({ id }: { id: string }): ReactNode {
+  const gradientId = `agent-pointer-${id.replaceAll(/[^a-z0-9_-]/giu, '-')}`
+  return <svg className="browser-agent-pointer" width="15" height="19" viewBox="0 0 24 30" fill="none" aria-label="Agent 正在操作">
+    <defs><linearGradient id={gradientId} x1="3" y1="2" x2="17" y2="25" gradientUnits="userSpaceOnUse"><stop stopColor="#9edbff" /><stop offset=".48" stopColor="#5b8cff" /><stop offset="1" stopColor="#8a63ff" /></linearGradient></defs>
+    <path d="M2.7 1.9v20.2l5.15-4.86 3.65 8.42 4.06-1.76-3.58-8.27 7.36-.2L2.7 1.9Z" fill={`url(#${gradientId})`} stroke="white" strokeWidth="1.45" strokeLinejoin="round" />
+  </svg>
 }
 
 function usePresence(open: boolean, exitDuration = 130): { mounted: boolean; phase: DialogPhase } {
@@ -769,12 +781,25 @@ export function App(): ReactNode {
             {browserExpanded ? null : <div className="browser-resizer" role="separator" aria-orientation="vertical" onPointerDown={startBrowserResize} />}
             <header className="browser-chrome">
               <div className="browser-tabbar">
-                <div className="browser-tab" title={state?.browser.url ? state.browser.title || state.browser.url : '新标签页'}><Globe2 aria-hidden="true" /><span>{state?.browser.url ? state.browser.title || state.browser.url : '新标签页'}</span></div>
+                <div className="browser-tabs" role="tablist" aria-label="浏览器标签页">
+                  {state?.browser.tabs.map((tab) => {
+                    const label = tab.url ? tab.title || tab.url : tab.sessionBound ? 'Agent 浏览器' : '新标签页'
+                    const selected = state.browser.activeTabId === tab.id
+                    return <div key={tab.id} className={`browser-tab${selected ? ' active' : ''}`} title={label}>
+                      <button className="browser-tab-main" type="button" role="tab" aria-selected={selected} onClick={() => void desktopApi.selectBrowserTab(tab.id)}>
+                        {tab.loading ? <RotateCw className="browser-tab-loading" aria-label="正在加载" /> : <span className="browser-tab-favicon" aria-hidden="true"><Globe2 />{tab.faviconUrl ? <img src={tab.faviconUrl} alt="" referrerPolicy="no-referrer" onError={(event) => { event.currentTarget.hidden = true }} /> : null}</span>}<span className="browser-tab-title">{label}</span>{tab.agentActive ? <AgentPointerIcon id={tab.id} /> : null}
+                      </button>
+                      <button className="browser-tab-close" type="button" aria-label={`关闭 ${label}`} onClick={(event) => { event.stopPropagation(); void desktopApi.closeBrowserTab(tab.id) }}><X /></button>
+                    </div>
+                  })}
+                  <button className="browser-new-tab" type="button" aria-label="新增标签页" title="新增标签页" onClick={() => void desktopApi.createBrowserTab()}><Plus /></button>
+                </div>
                 <div className="browser-panel-actions">
                   <button type="button" aria-label={browserExpanded ? '恢复面板宽度' : '展开面板'} title={browserExpanded ? '恢复面板宽度' : '展开面板'} onClick={toggleBrowserExpanded}>{browserExpanded ? <Minimize2 /> : <Maximize2 />}</button>
                   <button type="button" aria-label={`显示方式：${browserDisplayModeLabel}`} aria-expanded={browserDisplayMenuOpen} title={`显示方式：${browserDisplayModeLabel}`} onClick={(event) => openBrowserMenu('display', event.currentTarget)}>
                     {browserDisplayMode === 'split' ? <Columns2 /> : browserDisplayMode === 'drawer' ? <PanelRight /> : <FloatingWindowIcon />}
                   </button>
+                  <button type="button" aria-label="隐藏浏览器" title="隐藏浏览器" onClick={() => void desktopApi.setBrowserPanelOpen(false)}><X /></button>
                 </div>
               </div>
               <div className="browser-toolbar">
@@ -882,7 +907,7 @@ export function App(): ReactNode {
         <div className="drag-region" aria-hidden="true" />
         {state?.browser.settings.enabled ? (
           <button className="titlebar-browser-button" type="button" aria-label={browserOpen ? '隐藏浏览器侧栏' : '显示浏览器侧栏'} aria-pressed={browserOpen} onClick={() => void desktopApi.setBrowserPanelOpen(!browserOpen)}>
-            {browserOpen ? <PanelRightClose /> : <PanelRightOpen />}
+            <BrowserPanelIcon open={browserOpen} />
           </button>
         ) : null}
         <div className="window-controls" aria-hidden={state?.platform === 'macos'}>

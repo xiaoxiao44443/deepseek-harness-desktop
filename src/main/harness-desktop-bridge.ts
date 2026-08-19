@@ -134,6 +134,7 @@ export class HarnessDesktopBridgeHost {
       || pathname === '/v1/browser/settings'
       || pathname === '/v1/browser/history'
       || pathname === '/v1/browser/clear-data'
+      || pathname === '/v1/browser/agent-status'
       || pathname === '/v1/browser/action'
     if (!supported) {
       this.sendJson(response, 404, { accepted: false, message: 'Not found' })
@@ -219,6 +220,17 @@ export class HarnessDesktopBridgeHost {
       }
       const result = await this.options.browser.handleAgentRequest(await this.readJsonBody(request))
       this.sendJson(response, 200, result)
+      return
+    }
+
+    if (pathname === '/v1/browser/agent-status') {
+      if (request.method !== 'POST') {
+        response.setHeader('allow', 'POST')
+        this.sendJson(response, 405, { accepted: false, message: 'Method not allowed' })
+        return
+      }
+      this.options.browser.updateAgentStatus(await this.readJsonBody(request))
+      this.sendJson(response, 200, { accepted: true })
       return
     }
 

@@ -37,6 +37,14 @@ export type BrowserDisplayMode = 'split' | 'drawer' | 'floating'
 export type BrowserMenuKind = 'application' | 'display' | 'settings'
 export type DesktopApplicationMenuAction = 'development' | 'release-notes' | 'update'
 
+export interface DesktopApplicationMenuState {
+  appVersion: string
+  harnessVersion?: string
+  updateStatus: HarnessUpdateStatus
+  updateVersion?: string
+  patchEnabled: boolean
+}
+
 export interface DesktopBrowserMenuAnchor {
   x: number
   y: number
@@ -53,6 +61,18 @@ export interface DesktopBrowserSettings {
 export interface DesktopBrowserViewport {
   width: number
   height: number
+  deviceScaleFactor?: number
+}
+
+export interface DesktopBrowserTabState {
+  id: string
+  title: string
+  url: string
+  faviconUrl?: string
+  loading: boolean
+  agentActive: boolean
+  sessionBound: boolean
+  snapshotVersion: number
 }
 
 export interface DesktopBrowserState {
@@ -64,6 +84,8 @@ export interface DesktopBrowserState {
   canGoBack: boolean
   canGoForward: boolean
   zoomFactor: number
+  tabs: DesktopBrowserTabState[]
+  activeTabId?: string
   viewport?: DesktopBrowserViewport
 }
 
@@ -84,6 +106,44 @@ export interface DesktopBrowserHistoryEntry {
   url: string
   title: string
   visitedAt: string
+}
+
+export interface FloatingBrowserWindowState {
+  loading: boolean
+  url: string
+  title: string
+  canGoBack: boolean
+  canGoForward: boolean
+  maximized: boolean
+  displayMode: BrowserDisplayMode
+  zoomFactor: number
+  viewport: DesktopBrowserViewport | null
+  viewBounds: DesktopBrowserViewBounds | null
+  tabs: DesktopBrowserTabState[]
+  activeTabId?: string
+}
+
+export interface FloatingBrowserWindowBridge {
+  invoke<T = void>(action: string, value?: unknown): Promise<T>
+  onState(listener: (state: FloatingBrowserWindowState) => void): () => void
+}
+
+export type BrowserMenuWindowKind = BrowserMenuKind | 'context'
+
+export interface BrowserMenuWindowPayload {
+  kind: BrowserMenuWindowKind
+  renderToken?: number
+  state: DesktopBrowserState
+  history: DesktopBrowserHistoryEntry[]
+  application?: DesktopApplicationMenuState
+  context?: DesktopContextMenuRequest
+}
+
+export interface BrowserMenuWindowBridge {
+  invoke<T = void>(action: string, value?: unknown): Promise<T>
+  selectContextMenuItem(request: DesktopContextMenuActionRequest): Promise<void>
+  dismissContextMenu(requestId: string, restoreFocus?: boolean): Promise<void>
+  onState(listener: (payload: BrowserMenuWindowPayload) => void): () => void
 }
 
 export type DesktopBrowserNavigationAction = 'back' | 'forward' | 'reload' | 'stop'
@@ -136,6 +196,9 @@ export interface DesktopBridge {
   commitBrowserShellOverlay(): Promise<void>
   navigateBrowser(value: string): Promise<void>
   browserNavigationAction(action: DesktopBrowserNavigationAction): Promise<void>
+  createBrowserTab(): Promise<void>
+  selectBrowserTab(tabId: string): Promise<void>
+  closeBrowserTab(tabId: string): Promise<void>
   getBrowserHistory(): Promise<DesktopBrowserHistoryEntry[]>
   clearBrowserHistory(): Promise<void>
   clearBrowserData(): Promise<void>

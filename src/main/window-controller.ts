@@ -10,7 +10,8 @@ import { RUNTIME_PREPARATION_PROGRESS_EVENT, type HarnessRuntimeManager } from '
 import type { DevelopmentService } from './development-service.js'
 import { parsePluginInitializationFailure, type PluginRecoveryService } from './plugin-recovery.js'
 import { appendPluginContextMenuItems, BUILTIN_CONTEXT_MENU_ACTIONS, buildBuiltinContextMenuItems } from './context-menu.js'
-import { DEFAULT_BROWSER_SETTINGS, type DesktopApplicationMenuState, type DesktopBrowserService } from './desktop-browser.js'
+import { DEFAULT_BROWSER_SETTINGS, type DesktopBrowserService } from './desktop-browser.js'
+import type { DesktopApplicationMenuState } from '../shared/contracts.js'
 
 const STATE_CHANNEL = 'desktop:state'
 const CONTEXT_MENU_CHANNEL = 'desktop:context-menu'
@@ -403,6 +404,18 @@ export class WindowController {
     ipcMain.handle('desktop:browser-navigation-action', async (event, action: DesktopBrowserNavigationAction) => {
       if (event.sender !== this.window?.webContents) return
       await this.browser?.navigationAction(action)
+    })
+    ipcMain.handle('desktop:browser-new-tab', async (event) => {
+      if (event.sender !== this.window?.webContents) return
+      await this.browser?.createManualTab()
+    })
+    ipcMain.handle('desktop:browser-select-tab', async (event, tabId: string) => {
+      if (event.sender !== this.window?.webContents || typeof tabId !== 'string') return
+      await this.browser?.selectTab(tabId)
+    })
+    ipcMain.handle('desktop:browser-close-tab', async (event, tabId: string) => {
+      if (event.sender !== this.window?.webContents || typeof tabId !== 'string') return
+      await this.browser?.closeTab(tabId, true)
     })
     ipcMain.handle('desktop:browser-history', (event) => {
       if (event.sender !== this.window?.webContents) return []
@@ -835,6 +848,7 @@ export class WindowController {
         canGoBack: false,
         canGoForward: false,
         zoomFactor: 1,
+        tabs: [],
       },
       isMaximized: this.window?.isMaximized() ?? false,
     }

@@ -59,6 +59,16 @@ window.__ModuleLoader__.load({
         .dsh-desktop-browser-action[data-confirm="true"] { color: #ef6b73; }
         .dsh-desktop-browser-action:disabled { cursor: default; opacity: .5; }
         .dsh-desktop-browser-error { margin: 12px 0 0; color: #ef6b73; font-size: 12px; }
+        [data-tool^="browser_"]:not([data-state="error"]):not([data-state="stopped"]) [class*="_leading"] > * { display: none !important; }
+        [data-tool^="browser_"]:not([data-state="error"]):not([data-state="stopped"]) [class*="_leading"]::before {
+          width: 14px;
+          height: 14px;
+          flex: none;
+          background: currentColor;
+          content: "";
+          -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='4' width='18' height='16' rx='2'/%3E%3Cpath d='M3 8h18M9.5 11.5l7 5.4-4.1.5-1.9 3.4-1.7-.9 1.8-3.3-3.1-2.5Z'/%3E%3C/svg%3E") center / contain no-repeat;
+          mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='4' width='18' height='16' rx='2'/%3E%3Cpath d='M3 8h18M9.5 11.5l7 5.4-4.1.5-1.9 3.4-1.7-.9 1.8-3.3-3.1-2.5Z'/%3E%3C/svg%3E") center / contain no-repeat;
+        }
       `;
       document.head.appendChild(style);
       return () => { if (style.isConnected) style.remove(); };
@@ -213,7 +223,7 @@ window.__ModuleLoader__.load({
           React.createElement("div", { className: "dsh-desktop-browser-feature-icon" }, React.createElement(BrowserIcon)),
           React.createElement("div", { className: "dsh-desktop-browser-copy" },
             React.createElement("div", { className: "dsh-desktop-browser-title" }, "浏览器"),
-            React.createElement("div", { className: "dsh-desktop-browser-description" }, "让 Agent 控制隔离的内置浏览器")
+            React.createElement("div", { className: "dsh-desktop-browser-description" }, "让 DeepSeek Harness 控制内置浏览器")
           ),
           React.createElement(Toggle, {
             checked: settings.enabled,
