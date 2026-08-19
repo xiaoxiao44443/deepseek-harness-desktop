@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events'
 import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { app, BrowserWindow, ipcMain, session, WebContentsView, type Rectangle, type WebContents, type WebFrameMain } from 'electron'
+import { app, BrowserWindow, clipboard, ipcMain, nativeImage, session, WebContentsView, type NativeImage, type Rectangle, type WebContents, type WebFrameMain } from 'electron'
 import type {
   BrowserDisplayMode,
   BrowserMenuKind,
@@ -23,6 +23,8 @@ import type {
   BrowserAsyncEventKind,
   BrowserAsyncEventWaiter,
   BrowserDownloadRuntime,
+  BrowserPageAssetInventory,
+  BrowserPageAssetKind,
   BrowserLocatorMatch,
   BrowserLocatorResolution,
   BrowserLocatorStep,
@@ -35,11 +37,16 @@ import { DesktopBrowserMenuController } from './desktop-browser-menu-controller.
 import {
   evaluatePage,
   parseLocatorPlan,
+  prepareReadOnlyEvaluation,
+  readNavigationState,
   readConsoleLogs,
+  runNavigationWithRetry,
   strictLocator,
   targetFromRequest,
   waitForNavigation,
+  waitForNavigationStability,
   waitForPage,
+  type BrowserNavigationOutcome,
 } from './desktop-browser-automation.js'
 import {
   DEFAULT_BROWSER_SETTINGS,
@@ -70,11 +77,35 @@ const BACKGROUND_VIEWPORT = Object.freeze({ width: 1280, height: 800 })
 const EMPTY_BROWSER_URL = `data:text/html;charset=utf-8,${encodeURIComponent('<!doctype html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{width:100%;height:100%;margin:0}</style></head><body></body></html>')}`
 const MANUAL_TAB_ID = 'manual'
 
+function inputModifierState(value: unknown): { altKey: boolean; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean; mask: number } {
+  if (value === undefined) return { altKey: false, ctrlKey: false, metaKey: false, shiftKey: false, mask: 0 }
+  if (!Array.isArray(value) || value.some((key) => !['Alt', 'Control', 'ControlOrMeta', 'Meta', 'Shift'].includes(String(key)))) {
+    throw new Error('修饰键必须是 Alt、Control、ControlOrMeta、Meta 或 Shift 数组。')
+  }
+  const keys = new Set(value.map((key) => key === 'ControlOrMeta' ? process.platform === 'darwin' ? 'Meta' : 'Control' : String(key)))
+  const altKey = keys.has('Alt')
+  const ctrlKey = keys.has('Control')
+  const metaKey = keys.has('Meta')
+  const shiftKey = keys.has('Shift')
+  return { altKey, ctrlKey, metaKey, shiftKey, mask: (altKey ? 1 : 0) | (ctrlKey ? 2 : 0) | (metaKey ? 4 : 0) | (shiftKey ? 8 : 0) }
+}
+
+function mouseButton(value: unknown): { cdp: 'left' | 'middle' | 'right' | 'back' | 'forward'; dom: number } {
+  const normalized = value === undefined ? 'left' : value
+  if (normalized === 1 || normalized === 'left') return { cdp: 'left', dom: 0 }
+  if (normalized === 2 || normalized === 'middle') return { cdp: 'middle', dom: 1 }
+  if (normalized === 3 || normalized === 'right') return { cdp: 'right', dom: 2 }
+  if (normalized === 4) return { cdp: 'back', dom: 3 }
+  if (normalized === 5) return { cdp: 'forward', dom: 4 }
+  throw new Error('button 必须是 left/right/middle 或 1–5。')
+}
+
 export class DesktopBrowserService extends EventEmitter {
   private readonly settingsPath: string
   private readonly historyPath: string
   private readonly screenshotsPath: string
   private readonly downloadsPath: string
+  private readonly exportsPath: string
   private settings: DesktopBrowserSettings = { ...DEFAULT_BROWSER_SETTINGS }
   private history: DesktopBrowserHistoryEntry[] = []
   private window: BrowserWindow | undefined
@@ -107,6 +138,8 @@ export class DesktopBrowserService extends EventEmitter {
   private browserEventSequence = 0
   private readonly fileChoosers = new Map<string, { tabId: string; backendNodeId: number; multiple: boolean }>()
   private readonly downloads = new Map<string, BrowserDownloadRuntime>()
+  private readonly pageAssetInventories = new Map<string, BrowserPageAssetInventory>()
+  private readonly sessionNames = new Map<string, string>()
 
   constructor(private readonly dataRoot: string) {
     super()
@@ -119,11 +152,12 @@ export class DesktopBrowserService extends EventEmitter {
     this.historyPath = join(dataRoot, 'history.json')
     this.screenshotsPath = join(dataRoot, 'screenshots')
     this.downloadsPath = join(dataRoot, 'downloads')
+    this.exportsPath = join(dataRoot, 'exports')
   }
 
   async initialize(): Promise<void> {
     this.registerFloatingWindowIpc()
-    await Promise.all([mkdir(this.dataRoot, { recursive: true }), mkdir(this.downloadsPath, { recursive: true })])
+    await Promise.all([mkdir(this.dataRoot, { recursive: true }), mkdir(this.downloadsPath, { recursive: true }), mkdir(this.exportsPath, { recursive: true })])
     try {
       this.settings = normalizeBrowserSettings(JSON.parse(await readFile(this.settingsPath, 'utf8')))
     } catch {
@@ -202,6 +236,7 @@ export class DesktopBrowserService extends EventEmitter {
     this.tabs.clear()
     this.sessionTabs.clear()
     this.sessionActiveTabs.clear()
+    this.pageAssetInventories.clear()
   }
 
   async updateSettings(value: unknown): Promise<DesktopBrowserSettings> {
@@ -247,6 +282,7 @@ export class DesktopBrowserService extends EventEmitter {
     const previous = this.activeTab()
     if (previous !== undefined && previous !== tab) previous.view.setVisible(false)
     this.activeTabId = tab.id
+    tab.lastOpened = new Date().toISOString()
     this.view = tab.view
     if (tab.sessionId !== undefined) {
       this.sessionActiveTabs.set(tab.sessionId, tab.id)
@@ -275,6 +311,9 @@ export class DesktopBrowserService extends EventEmitter {
     const closesLastVisibleTab = hideBrowserWhenLast && this.tabs.size === 1
     const wasActive = this.activeTabId === tab.id
     this.tabs.delete(tab.id)
+    for (const [inventoryId, inventory] of this.pageAssetInventories) {
+      if (inventory.tabId === tab.id) this.pageAssetInventories.delete(inventoryId)
+    }
     if (tab.sessionId !== undefined) {
       const sessionTabIds = this.sessionTabs.get(tab.sessionId)
       sessionTabIds?.delete(tab.id)
@@ -619,17 +658,115 @@ export class DesktopBrowserService extends EventEmitter {
     await this.navigationActionFor(tab, action)
   }
 
-  private async navigateTab(tab: BrowserTabRuntime, value: string, allowSearch = true): Promise<void> {
+  private async navigateTab(tab: BrowserTabRuntime, value: string, allowSearch = true): Promise<BrowserNavigationOutcome> {
     const url = normalizeBrowserAddress(value, allowSearch)
+    const before = await readNavigationState(tab, this.debuggerCommandFor.bind(this))
+    const replaceSyntheticBlank = tab.syntheticBlankHistory
     await tab.view.webContents.loadURL(url)
+    if (replaceSyntheticBlank && !tab.view.webContents.isDestroyed()) {
+      tab.view.webContents.navigationHistory.clear()
+      tab.syntheticBlankHistory = false
+    }
+    return await waitForNavigationStability(tab, before, {
+      timeoutMs: 10_000,
+      waitUntil: 'load',
+      expectedUrl: url,
+      requireNavigation: true,
+    }, this.debuggerCommandFor.bind(this))
   }
 
-  private async navigationActionFor(tab: BrowserTabRuntime, action: DesktopBrowserNavigationAction): Promise<void> {
+  private async historyNavigationFor(
+    tab: BrowserTabRuntime,
+    action: 'back' | 'forward',
+  ): Promise<Record<string, unknown>> {
+    const before = await readNavigationState(tab, this.debuggerCommandFor.bind(this))
+    const history = await this.debuggerCommandFor(tab, 'Page.getNavigationHistory') as {
+      currentIndex?: unknown
+      entries?: Array<{ id?: unknown; url?: unknown; title?: unknown }>
+    }
+    const currentIndex = typeof history.currentIndex === 'number' && Number.isSafeInteger(history.currentIndex)
+      ? history.currentIndex
+      : -1
+    const entries = Array.isArray(history.entries) ? history.entries : []
+    const targetIndex = currentIndex + (action === 'back' ? -1 : 1)
+    const target = entries[targetIndex]
+    if (target === undefined || typeof target.id !== 'number' || typeof target.url !== 'string') {
+      return {
+        ok: true,
+        status: 'no-op',
+        reason: 'no-history-entry',
+        tabId: tab.id,
+        action,
+        attempts: 0,
+        url: before.url,
+      }
+    }
+    const targetId = target.id
+    const targetUrl = target.url
+
+    const retry = await runNavigationWithRetry(
+      async () => {
+        await this.debuggerCommandFor(tab, 'Page.navigateToHistoryEntry', { entryId: targetId })
+      },
+      async () => await waitForNavigationStability(tab, before, {
+        timeoutMs: 8_000,
+        waitUntil: 'load',
+        expectedUrl: targetUrl,
+        requireNavigation: true,
+      }, this.debuggerCommandFor.bind(this)),
+    )
+    if (retry.outcome?.status === 'success') {
+      return {
+        ok: true,
+        status: 'success',
+        tabId: tab.id,
+        action,
+        attempts: retry.attempts,
+        url: retry.outcome.state.url,
+        elapsedMs: retry.outcome.elapsedMs,
+        canGoBack: targetIndex > 0,
+        canGoForward: targetIndex < entries.length - 1,
+      }
+    }
+    const latest = retry.outcome?.state ?? await readNavigationState(tab, this.debuggerCommandFor.bind(this))
+    return {
+      ok: false,
+      status: 'timeout',
+      reason: retry.error instanceof Error ? retry.error.message : retry.outcome?.reason ?? 'history-navigation-failed',
+      tabId: tab.id,
+      action,
+      attempts: retry.attempts,
+      expectedUrl: targetUrl,
+      url: latest.url,
+      observedTitle: latest.title,
+    }
+  }
+
+  private async navigationActionFor(tab: BrowserTabRuntime, action: DesktopBrowserNavigationAction): Promise<Record<string, unknown>> {
+    if (action === 'back' || action === 'forward') return await this.historyNavigationFor(tab, action)
     const contents = tab.view.webContents
-    if (action === 'back' && contents.navigationHistory.canGoBack()) contents.navigationHistory.goBack()
-    else if (action === 'forward' && contents.navigationHistory.canGoForward()) contents.navigationHistory.goForward()
-    else if (action === 'reload') contents.reload()
-    else if (action === 'stop') contents.stop()
+    if (action === 'stop') {
+      const started = tab.loading
+      if (started) contents.stop()
+      return { ok: true, status: started ? 'success' : 'no-op', tabId: tab.id, action, started }
+    }
+    if (action !== 'reload') return { ok: true, status: 'no-op', tabId: tab.id, action }
+    const before = await readNavigationState(tab, this.debuggerCommandFor.bind(this))
+    contents.reload()
+    const outcome = await waitForNavigationStability(tab, before, {
+      timeoutMs: 10_000,
+      waitUntil: 'load',
+      requireNavigation: true,
+    }, this.debuggerCommandFor.bind(this))
+    return {
+      ok: outcome.status === 'success',
+      status: outcome.status,
+      ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
+      tabId: tab.id,
+      action,
+      url: outcome.state.url,
+      elapsedMs: outcome.elapsedMs,
+    }
   }
 
   getHistory(): DesktopBrowserHistoryEntry[] {
@@ -664,6 +801,71 @@ export class DesktopBrowserService extends EventEmitter {
         tabs: this.sessionTabStates(sessionId),
       }
     }
+    if (action === 'name-session') {
+      if (typeof request.name !== 'string' || request.name.trim().length === 0 || request.name.length > 160) throw new Error('name 必须是非空短字符串。')
+      this.sessionNames.set(sessionId, request.name.trim())
+      return { ok: true, name: request.name.trim() }
+    }
+    if (action === 'user-tabs') {
+      const tabs = [...this.tabs.values()].filter((tab) => tab.sessionId === undefined && !tab.view.webContents.isDestroyed()).map((tab) => {
+        this.capturePageState(tab)
+        return { id: tab.id, providerTabId: tab.id, title: tab.title, url: tab.url, lastOpened: tab.lastOpened }
+      }).sort((left, right) => right.lastOpened.localeCompare(left.lastOpened))
+      return { ok: true, tabs }
+    }
+    if (action === 'claim-tab') {
+      if (request.userTab === null || typeof request.userTab !== 'object' || Array.isArray(request.userTab)) throw new Error('userTab 必须来自 browser.user.openTabs()。')
+      const value = request.userTab as Record<string, unknown>
+      const id = typeof value.providerTabId === 'string' ? value.providerTabId : value.id
+      if (typeof id !== 'string' || id.length === 0) throw new Error('userTab 缺少有效 id。')
+      const tab = this.tabs.get(id)
+      if (tab === undefined || tab.sessionId !== undefined || tab.view.webContents.isDestroyed()) throw new Error('用户标签页已不可用或已被其他会话接管。')
+      this.capturePageState(tab)
+      if (value.title !== undefined && value.title !== tab.title) throw new Error('用户标签页标题已变化，请重新调用 openTabs()。')
+      if (value.url !== undefined && value.url !== tab.url) throw new Error('用户标签页 URL 已变化，请重新调用 openTabs()。')
+      this.agentStatuses.set(sessionId, true)
+      tab.claimedFromUser = true
+      this.bindAgentTab(tab, sessionId)
+      return { ok: true, tabId: tab.id, title: tab.title, url: tab.url }
+    }
+    if (action === 'browser-history') {
+      const queries = request.queries === undefined ? [] : request.queries
+      if (!Array.isArray(queries) || queries.length > 12 || queries.some((query) => typeof query !== 'string' || query.trim().length === 0)) {
+        throw new Error('queries 必须是最多 12 个非空字符串。')
+      }
+      const parseBound = (value: unknown, name: string): number | undefined => {
+        if (value === undefined) return undefined
+        if (typeof value !== 'string') throw new Error(`${name} 必须是 ISO 日期字符串。`)
+        const timestamp = Date.parse(value)
+        if (!Number.isFinite(timestamp)) throw new Error(`${name} 不是有效日期。`)
+        return timestamp
+      }
+      const from = parseBound(request.from, 'from')
+      const to = parseBound(request.to, 'to')
+      const limit = request.limit === undefined ? 100 : positiveInteger(request.limit, 'limit', 1, 500)
+      const terms = (queries as string[]).map((query) => query.toLocaleLowerCase())
+      const entries = this.history.filter((entry) => {
+        const timestamp = Date.parse(entry.visitedAt)
+        const haystack = `${entry.title}\n${entry.url}`.toLocaleLowerCase()
+        return (from === undefined || timestamp >= from) && (to === undefined || timestamp <= to)
+          && (terms.length === 0 || terms.some((term) => haystack.includes(term)))
+      }).slice(0, limit).map((entry) => ({ dateVisited: entry.visitedAt, title: entry.title, url: entry.url }))
+      return { ok: true, entries }
+    }
+    if (action === 'browser-visibility') {
+      if (request.visible === undefined) return { ok: true, visible: this.panelOpen && this.settings.enabled }
+      if (typeof request.visible !== 'boolean') throw new Error('visible 必须是布尔值。')
+      if (request.visible) {
+        const tab = await this.agentTabForRequest(sessionId, request)
+        await this.selectTab(tab.id)
+      }
+      await this.setPanelOpen(request.visible)
+      return { ok: true, visible: this.panelOpen && this.settings.enabled }
+    }
+    if (action === 'browser-viewport') {
+      const tab = await this.agentTabForRequest(sessionId, request)
+      return await this.setViewport(tab, request)
+    }
     if (action === 'new') {
       this.agentStatuses.set(sessionId, true)
       const tab = await this.createAgentTab(sessionId, true)
@@ -676,6 +878,9 @@ export class DesktopBrowserService extends EventEmitter {
     }
     if (action === 'finalize') {
       const keep = new Set<string>()
+      for (const tabId of this.sessionTabs.get(sessionId) ?? []) {
+        if (this.tabs.get(tabId)?.retentionMark !== undefined) keep.add(tabId)
+      }
       if (request.keep !== undefined && !Array.isArray(request.keep)) throw new Error('keep 必须是数组。')
       for (const entry of request.keep ?? []) {
         if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) throw new Error('keep 项格式无效。')
@@ -687,23 +892,43 @@ export class DesktopBrowserService extends EventEmitter {
         keep.add(tabId)
       }
       const closed: string[] = []
+      const released: string[] = []
       for (const tabId of [...this.sessionTabs.get(sessionId) ?? []]) {
-        if (keep.has(tabId)) continue
+        const tab = this.tabs.get(tabId)
+        if (keep.has(tabId)) {
+          if (tab !== undefined) delete tab.retentionMark
+          continue
+        }
+        if (tab?.claimedFromUser === true) {
+          this.releaseClaimedTab(tab)
+          released.push(tabId)
+          continue
+        }
         await this.closeTab(tabId)
         closed.push(tabId)
       }
-      return { ok: true, closed, tabs: this.sessionTabStates(sessionId) }
+      return { ok: true, closed, released, tabs: this.sessionTabStates(sessionId) }
     }
     this.agentStatuses.set(sessionId, true)
     const tab = await this.agentTabForRequest(sessionId, request)
     if (action === 'navigate') {
       if (typeof request.url !== 'string') throw new Error('url 是必填项。')
-      await this.navigateTab(tab, request.url, false)
-      return { ok: true, tabId: tab.id, url: tab.url || normalizeBrowserAddress(request.url, false) }
+      const outcome = await this.navigateTab(tab, request.url, false)
+      return {
+        ok: outcome.status === 'success',
+        status: outcome.status,
+        ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
+        tabId: tab.id,
+        url: outcome.state.url || normalizeBrowserAddress(request.url, false),
+        elapsedMs: outcome.elapsedMs,
+      }
     }
     if (action === 'snapshot') return await this.snapshot(tab)
     if (action === 'wait') return await waitForPage(tab, request, this.debuggerCommandFor.bind(this), this.snapshot.bind(this))
-    if (action === 'navigation-state') return { ok: true, tabId: tab.id, version: tab.navigationVersion, url: tab.url }
+    if (action === 'navigation-state') {
+      const state = await readNavigationState(tab, this.debuggerCommandFor.bind(this))
+      return { ok: true, tabId: tab.id, version: state.version, url: state.url, title: state.title, before: state }
+    }
     if (action === 'wait-navigation') return await waitForNavigation(tab, request, true, this.debuggerCommandFor.bind(this))
     if (action === 'wait-url') return await waitForNavigation(tab, request, false, this.debuggerCommandFor.bind(this))
     if (action === 'wait-timeout') {
@@ -721,6 +946,17 @@ export class DesktopBrowserService extends EventEmitter {
       return { ok: true, tabId: tab.id, dialog: tab.jsDialog ?? null }
     }
     if (action === 'handle-dialog') return await this.handleJsDialog(tab, request)
+    if (action === 'mark-tab') {
+      if (request.status !== 'handoff' && request.status !== 'completed') throw new Error('status 必须是 handoff 或 completed。')
+      tab.retentionMark = request.status
+      return { ok: true, tabId: tab.id, status: request.status }
+    }
+    if (action.startsWith('clipboard-')) return this.clipboardAction(tab, action, request)
+    if (action === 'content-export' || action === 'content-export-gsuite' || action === 'content-export-youtube') {
+      return await this.exportTabContent(tab, action, request)
+    }
+    if (action === 'page-assets-list') return await this.listPageAssets(tab)
+    if (action === 'page-assets-bundle') return await this.bundlePageAssets(tab, request)
     if (action === 'locator') return await this.locatorAction(tab, request)
     if (action === 'hover') return await this.hover(tab, request)
     if (action === 'click') return await this.click(tab, request)
@@ -738,14 +974,266 @@ export class DesktopBrowserService extends EventEmitter {
       return { ok: true, tabId: tab.id, visible: this.panelOpen }
     }
     if (action === 'back' || action === 'forward' || action === 'reload' || action === 'stop') {
-      await this.navigationActionFor(tab, action)
-      return { ok: true, tabId: tab.id, action }
+      return await this.navigationActionFor(tab, action)
     }
     if (action === 'close') {
       await this.closeTab(tab.id)
       return { ok: true, tabId: tab.id }
     }
     throw new Error(`不支持的浏览器操作：${action || 'unknown'}`)
+  }
+
+  private clipboardAction(tab: BrowserTabRuntime, action: string, request: DesktopBrowserAgentRequest): Record<string, unknown> {
+    if (action === 'clipboard-read-text') return { ok: true, tabId: tab.id, text: clipboard.readText() }
+    if (action === 'clipboard-write-text') {
+      if (typeof request.text !== 'string') throw new Error('text 必须是字符串。')
+      clipboard.writeText(request.text)
+      return { ok: true, tabId: tab.id }
+    }
+    if (action === 'clipboard-read') {
+      const entries: Array<Record<string, unknown>> = []
+      const formats = new Set(clipboard.availableFormats())
+      const text = clipboard.readText()
+      if (text.length > 0 || formats.has('text/plain')) entries.push({ mimeType: 'text/plain', text })
+      const html = clipboard.readHTML()
+      if (html.length > 0 || formats.has('text/html')) entries.push({ mimeType: 'text/html', text: html })
+      const image = clipboard.readImage()
+      if (!image.isEmpty()) entries.push({ mimeType: 'image/png', base64: image.toPNG().toString('base64') })
+      return { ok: true, tabId: tab.id, items: entries.length === 0 ? [] : [{ entries, presentationStyle: 'unspecified' }] }
+    }
+    if (action === 'clipboard-write') {
+      if (!Array.isArray(request.items) || request.items.length === 0) throw new Error('items 必须是非空剪贴板项数组。')
+      let text: string | undefined
+      let html: string | undefined
+      let image: NativeImage | undefined
+      for (const item of request.items) {
+        if (item === null || typeof item !== 'object' || Array.isArray(item)) throw new Error('clipboard item 格式无效。')
+        const entries = (item as Record<string, unknown>).entries
+        if (!Array.isArray(entries) || entries.length === 0) throw new Error('clipboard item.entries 必须是非空数组。')
+        for (const entry of entries) {
+          if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) throw new Error('clipboard entry 格式无效。')
+          const value = entry as Record<string, unknown>
+          if (value.mimeType === 'text/plain' && typeof value.text === 'string') text = value.text
+          else if (value.mimeType === 'text/html' && typeof value.text === 'string') html = value.text
+          else if (value.mimeType === 'image/png' && typeof value.base64 === 'string') {
+            image = nativeImage.createFromBuffer(Buffer.from(value.base64, 'base64'))
+            if (image.isEmpty()) throw new Error('image/png 剪贴板数据无效。')
+          } else throw new Error(`不支持的剪贴板 MIME：${String(value.mimeType)}`)
+        }
+      }
+      clipboard.write({ ...(text === undefined ? {} : { text }), ...(html === undefined ? {} : { html }), ...(image === undefined ? {} : { image }) })
+      return { ok: true, tabId: tab.id }
+    }
+    throw new Error(`不支持的剪贴板操作：${action}`)
+  }
+
+  private exportArtifactPath(tab: BrowserTabRuntime, extension: string, label = 'page'): string {
+    const title = (tab.title || label).replaceAll(/[^\p{L}\p{N}._ -]/gu, '_').trim().slice(0, 80) || label
+    this.browserEventSequence += 1
+    return join(this.exportsPath, `${Date.now().toString(36)}-${this.browserEventSequence.toString(36)}-${title}.${extension}`)
+  }
+
+  private async fetchArtifact(tab: BrowserTabRuntime, url: string, path: string): Promise<string> {
+    const response = await tab.view.webContents.session.fetch(url, { redirect: 'follow' })
+    if (!response.ok) throw new Error(`导出下载失败：HTTP ${String(response.status)}`)
+    await writeFile(path, Buffer.from(await response.arrayBuffer()))
+    return path
+  }
+
+  private async exportTabContent(tab: BrowserTabRuntime, action: string, request: DesktopBrowserAgentRequest): Promise<Record<string, unknown>> {
+    if (action === 'content-export') {
+      const path = this.exportArtifactPath(tab, 'html')
+      await tab.view.webContents.savePage(path, 'HTMLComplete')
+      return { ok: true, tabId: tab.id, path }
+    }
+    if (action === 'content-export-gsuite') {
+      const type = request.exportType
+      if (!['pdf', 'md', 'xlsx', 'csv', 'docx', 'pptx'].includes(String(type))) throw new Error('不支持的 Google Workspace 导出类型。')
+      const current = new URL(tab.view.webContents.getURL())
+      if (current.hostname !== 'docs.google.com') throw new Error('当前标签不是 Google Workspace 文档。')
+      const match = current.pathname.match(/^\/(document|spreadsheets|presentation)\/d\/([^/]+)/u)
+      if (match === null) throw new Error('无法从当前 Google Workspace URL 识别文档。')
+      const [, product, id] = match
+      const exportType = String(type)
+      let exportUrl: string
+      if (product === 'presentation') exportUrl = `https://docs.google.com/presentation/d/${id}/export/${exportType}`
+      else {
+        const format = exportType === 'md' ? 'txt' : exportType
+        exportUrl = `https://docs.google.com/${product}/d/${id}/export?format=${format}`
+      }
+      const path = this.exportArtifactPath(tab, exportType)
+      await this.fetchArtifact(tab, exportUrl, path)
+      return { ok: true, tabId: tab.id, path }
+    }
+    const currentUrl = tab.view.webContents.getURL()
+    if (!/^https:\/\/(?:www\.)?youtube\.com\/watch(?:\?|$)/iu.test(currentUrl)) throw new Error('当前标签不是 YouTube 视频页。')
+    const response = await this.debuggerCommandFor(tab, 'Runtime.evaluate', {
+      expression: `(() => {
+        const visible = [...document.querySelectorAll('ytd-transcript-segment-renderer .segment-text')]
+          .map((node) => String(node.textContent || '').trim()).filter(Boolean);
+        const tracks = globalThis.ytInitialPlayerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+        return { visible, captionUrl: tracks[0]?.baseUrl || null };
+      })()`,
+      returnByValue: true,
+    }) as { result?: { value?: { visible?: unknown; captionUrl?: unknown } } }
+    const visible = response.result?.value?.visible
+    let transcript = Array.isArray(visible) ? visible.filter((entry): entry is string => typeof entry === 'string').join('\n') : ''
+    if (transcript.length === 0 && typeof response.result?.value?.captionUrl === 'string') {
+      const captionUrl = new URL(response.result.value.captionUrl)
+      captionUrl.searchParams.set('fmt', 'json3')
+      const captionResponse = await tab.view.webContents.session.fetch(captionUrl.toString())
+      if (!captionResponse.ok) throw new Error(`字幕下载失败：HTTP ${String(captionResponse.status)}`)
+      const payload = await captionResponse.json() as { events?: Array<{ segs?: Array<{ utf8?: unknown }> }> }
+      transcript = (payload.events ?? []).flatMap((event) => event.segs ?? []).map((segment) => typeof segment.utf8 === 'string' ? segment.utf8 : '').join('').replaceAll('\n', '\n').trim()
+    }
+    if (transcript.length === 0) throw new Error('当前视频没有可用字幕；请先在页面中打开 transcript。')
+    const path = this.exportArtifactPath(tab, 'txt', 'youtube-transcript')
+    await writeFile(path, transcript, 'utf8')
+    return { ok: true, tabId: tab.id, path }
+  }
+
+  private async listPageAssets(tab: BrowserTabRuntime): Promise<Record<string, unknown>> {
+    const response = await this.debuggerCommandFor(tab, 'Runtime.evaluate', {
+      expression: `(() => {
+        const rows = [];
+        const add = (url, kind, source) => {
+          try {
+            const absolute = new URL(String(url || ''), document.baseURI).href;
+            if (!/^https?:/i.test(absolute)) return;
+            rows.push({ url: absolute, kind, source });
+          } catch {}
+        };
+        for (const entry of performance.getEntriesByType('resource')) {
+          const initiator = String(entry.initiatorType || '');
+          const kind = initiator === 'img' ? 'image' : initiator === 'css' || initiator === 'link' ? 'stylesheet'
+            : initiator === 'video' ? 'video' : initiator === 'script' ? 'script' : 'other';
+          add(entry.name, kind, { kind: 'resource' });
+        }
+        const selectors = [
+          ['img[src],img[srcset]', 'image', ['src', 'srcset']],
+          ['source[src],source[srcset]', 'image', ['src', 'srcset']],
+          ['video[src],video[poster],video source[src]', 'video', ['src', 'poster']],
+          ['link[rel~="stylesheet"][href]', 'stylesheet', ['href']],
+          ['script[src]', 'script', ['src']],
+        ];
+        for (const [selector, kind, attributes] of selectors) {
+          for (const element of document.querySelectorAll(selector)) {
+            for (const attribute of attributes) {
+              const raw = element.getAttribute(attribute);
+              if (!raw) continue;
+              const values = attribute === 'srcset' ? raw.split(',').map((part) => part.trim().split(/\\s+/)[0]) : [raw];
+              for (const value of values) add(value, kind, { kind: 'attribute', nodeId: [...document.querySelectorAll('*')].indexOf(element) + 1, property: attribute });
+            }
+          }
+        }
+        for (const element of [...document.querySelectorAll('body *')].slice(0, 600)) {
+          const style = getComputedStyle(element);
+          for (const property of ['background-image', 'mask-image', 'content']) {
+            const value = style.getPropertyValue(property);
+            for (const match of value.matchAll(/url\\(["']?([^"')]+)["']?\\)/g)) add(match[1], 'image', { kind: 'computedStyle', property });
+          }
+        }
+        return {
+          pageUrl: location.href,
+          rows,
+          inlineSvgs: [...document.querySelectorAll('svg')].slice(0, 100).map((svg, index) => ({
+            markup: svg.outerHTML.slice(0, 200000),
+            name: svg.getAttribute('aria-label') || svg.id || 'inline-svg-' + (index + 1),
+          })),
+        };
+      })()`,
+      returnByValue: true,
+    }) as { result?: { value?: { pageUrl?: unknown; rows?: unknown; inlineSvgs?: unknown } } }
+    const raw = response.result?.value
+    const rows = Array.isArray(raw?.rows) ? raw.rows : []
+    const byUrl = new Map<string, { kind: BrowserPageAssetKind; sources: BrowserPageAssetInventory['assets'][number]['sources'] }>()
+    const classify = (url: string, hint: BrowserPageAssetKind): BrowserPageAssetKind => {
+      const pathname = new URL(url).pathname.toLocaleLowerCase()
+      if (/\.(?:woff2?|ttf|otf|eot)$/u.test(pathname)) return 'font'
+      if (/\.(?:png|jpe?g|gif|webp|avif|svg|ico)$/u.test(pathname)) return 'image'
+      if (/\.(?:css)$/u.test(pathname)) return 'stylesheet'
+      if (/\.(?:mp4|webm|mov|m4v|ogg)$/u.test(pathname)) return 'video'
+      return hint
+    }
+    for (const entry of rows.slice(0, 2_000)) {
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue
+      const value = entry as Record<string, unknown>
+      if (typeof value.url !== 'string' || !/^https?:\/\//iu.test(value.url)) continue
+      const hinted = ['script', 'font', 'image', 'stylesheet', 'video', 'other'].includes(String(value.kind)) ? value.kind as BrowserPageAssetKind : 'other'
+      const sourceValue = value.source !== null && typeof value.source === 'object' && !Array.isArray(value.source) ? value.source as Record<string, unknown> : {}
+      const source = {
+        kind: ['attribute', 'computedStyle', 'resource'].includes(String(sourceValue.kind)) ? sourceValue.kind as 'attribute' | 'computedStyle' | 'resource' : 'resource',
+        ...(typeof sourceValue.nodeId === 'number' ? { nodeId: sourceValue.nodeId } : {}),
+        ...(typeof sourceValue.property === 'string' ? { property: sourceValue.property } : {}),
+      }
+      const existing = byUrl.get(value.url)
+      if (existing === undefined) byUrl.set(value.url, { kind: classify(value.url, hinted), sources: [source] })
+      else if (!existing.sources.some((candidate) => JSON.stringify(candidate) === JSON.stringify(source))) existing.sources.push(source)
+    }
+    this.browserEventSequence += 1
+    const inventoryId = `assets-${Date.now().toString(36)}-${this.browserEventSequence.toString(36)}`
+    const assets = [...byUrl].map(([url, value], index) => {
+      let name = `asset-${String(index + 1)}`
+      try { name = decodeURIComponent(basename(new URL(url).pathname)) || name } catch {}
+      return { id: `${inventoryId}-${String(index + 1)}`, kind: value.kind, name, url, sources: value.sources }
+    })
+    const inlineSvgs = (Array.isArray(raw?.inlineSvgs) ? raw.inlineSvgs : []).flatMap((entry, index) => {
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return []
+      const value = entry as Record<string, unknown>
+      if (typeof value.markup !== 'string') return []
+      return [{ id: `${inventoryId}-svg-${String(index + 1)}`, markup: value.markup, name: typeof value.name === 'string' ? value.name : `inline-svg-${String(index + 1)}` }]
+    })
+    const inventory: BrowserPageAssetInventory = { id: inventoryId, tabId: tab.id, pageUrl: typeof raw?.pageUrl === 'string' ? raw.pageUrl : null, assets, inlineSvgs }
+    this.pageAssetInventories.set(inventoryId, inventory)
+    const byKind: Partial<Record<BrowserPageAssetKind, number>> = {}
+    for (const asset of assets) byKind[asset.kind] = (byKind[asset.kind] ?? 0) + 1
+    return { ok: true, tabId: tab.id, id: inventoryId, assets, inlineSvgs, pageUrl: inventory.pageUrl, summary: { byKind, inlineSvgCount: inlineSvgs.length, totalCount: assets.length } }
+  }
+
+  private async bundlePageAssets(tab: BrowserTabRuntime, request: DesktopBrowserAgentRequest): Promise<Record<string, unknown>> {
+    if (typeof request.inventoryId !== 'string' || request.inventoryId.length === 0) throw new Error('inventoryId 是必填项。')
+    const inventory = this.pageAssetInventories.get(request.inventoryId)
+    if (inventory === undefined || inventory.tabId !== tab.id) throw new Error('pageAssets inventory 已失效或不属于当前标签。')
+    const assetIds = request.assetIds === undefined ? undefined : request.assetIds
+    if (assetIds !== undefined && (!Array.isArray(assetIds) || assetIds.some((id) => typeof id !== 'string'))) throw new Error('assetIds 必须是字符串数组。')
+    const kinds = request.kinds === undefined ? undefined : request.kinds
+    const bundleKinds = new Set<BrowserPageAssetKind>(['font', 'image', 'stylesheet', 'video'])
+    if (kinds !== undefined && (!Array.isArray(kinds) || kinds.some((kind) => !bundleKinds.has(kind as BrowserPageAssetKind)))) throw new Error('kinds 包含不可打包的资源类型。')
+    const idSet = assetIds === undefined ? undefined : new Set(assetIds as string[])
+    const kindSet = kinds === undefined ? undefined : new Set(kinds as BrowserPageAssetKind[])
+    const selected = inventory.assets.filter((asset) => bundleKinds.has(asset.kind)
+      && (idSet === undefined || idSet.has(asset.id)) && (kindSet === undefined || kindSet.has(asset.kind)))
+    const startedAt = Date.now()
+    const directoryPath = join(this.exportsPath, `page-assets-${inventory.id}`)
+    await mkdir(directoryPath, { recursive: true })
+    const downloaded: Array<Record<string, unknown>> = []
+    const failures: Array<Record<string, unknown>> = []
+    const usedNames = new Set<string>()
+    for (const asset of selected) {
+      let name = asset.name.replaceAll(/[^\p{L}\p{N}._ -]/gu, '_').slice(0, 120) || asset.id
+      if (usedNames.has(name)) name = `${asset.id}-${name}`
+      usedNames.add(name)
+      const path = join(directoryPath, name)
+      try {
+        const response = await tab.view.webContents.session.fetch(asset.url, { redirect: 'follow' })
+        if (!response.ok) throw new Error(`HTTP ${String(response.status)}`)
+        await writeFile(path, Buffer.from(await response.arrayBuffer()))
+        downloaded.push({ id: asset.id, kind: asset.kind, name, path, url: asset.url, contentType: response.headers.get('content-type') })
+      } catch (error) {
+        failures.push({ id: asset.id, name, url: asset.url, contentType: null, reason: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    const manifestPath = join(directoryPath, 'manifest.json')
+    await writeFile(manifestPath, JSON.stringify({ inventoryId: inventory.id, pageUrl: inventory.pageUrl, assets: downloaded, failures }, null, 2), 'utf8')
+    return {
+      ok: true,
+      tabId: tab.id,
+      assets: downloaded,
+      directoryPath,
+      failures,
+      manifestPath,
+      summary: { downloadedCount: downloaded.length, elapsedMs: Date.now() - startedAt, failedCount: failures.length, requestedCount: selected.length },
+    }
   }
 
   private agentSessionId(request: DesktopBrowserAgentRequest): string {
@@ -760,6 +1248,7 @@ export class DesktopBrowserService extends EventEmitter {
     for (const tabId of this.sessionTabs.get(sessionId) ?? []) {
       const tab = this.tabs.get(tabId)
       if (tab === undefined) continue
+      this.capturePageState(tab)
       states.push({
         id: tab.id,
         title: tab.title,
@@ -1085,6 +1574,40 @@ export class DesktopBrowserService extends EventEmitter {
     return manual.view
   }
 
+  private bindAgentTab(tab: BrowserTabRuntime, sessionId: string): BrowserTabRuntime {
+    if (tab.sessionId !== undefined && tab.sessionId !== sessionId) throw new Error('该浏览器标签已属于另一个 DSH 会话。')
+    tab.sessionId = sessionId
+    if (tab.title === '新标签页') tab.title = 'Agent 浏览器'
+    let sessionTabIds = this.sessionTabs.get(sessionId)
+    if (sessionTabIds === undefined) {
+      sessionTabIds = new Set()
+      this.sessionTabs.set(sessionId, sessionTabIds)
+    }
+    sessionTabIds.add(tab.id)
+    this.sessionActiveTabs.set(sessionId, tab.id)
+    this.refreshSessionAgentTabs(sessionId)
+    return tab
+  }
+
+  private releaseClaimedTab(tab: BrowserTabRuntime): void {
+    const sessionId = tab.sessionId
+    if (sessionId === undefined || tab.claimedFromUser !== true) return
+    const sessionTabIds = this.sessionTabs.get(sessionId)
+    sessionTabIds?.delete(tab.id)
+    if (sessionTabIds?.size === 0) this.sessionTabs.delete(sessionId)
+    if (this.sessionActiveTabs.get(sessionId) === tab.id) {
+      const next = sessionTabIds === undefined ? undefined : [...sessionTabIds].at(-1)
+      if (next === undefined) this.sessionActiveTabs.delete(sessionId)
+      else this.sessionActiveTabs.set(sessionId, next)
+    }
+    delete tab.sessionId
+    delete tab.claimedFromUser
+    delete tab.retentionMark
+    tab.agentActive = false
+    this.refreshSessionAgentTabs(sessionId)
+    this.changed()
+  }
+
   private async createAgentTab(sessionId: string, reuseEmptyManual = false): Promise<BrowserTabRuntime> {
     const manual = reuseEmptyManual
       ? [...this.tabs.values()].reverse().find((candidate) => candidate.sessionId === undefined
@@ -1099,19 +1622,7 @@ export class DesktopBrowserService extends EventEmitter {
       && !manual.view.webContents.isDestroyed()
       ? manual
       : await this.createTab(`agent-${(++this.tabSequence).toString(36)}`, sessionId)
-    if (tab.sessionId === undefined) {
-      tab.sessionId = sessionId
-      tab.title = 'Agent 浏览器'
-    }
-    let sessionTabIds = this.sessionTabs.get(sessionId)
-    if (sessionTabIds === undefined) {
-      sessionTabIds = new Set()
-      this.sessionTabs.set(sessionId, sessionTabIds)
-    }
-    sessionTabIds.add(tab.id)
-    this.sessionActiveTabs.set(sessionId, tab.id)
-    this.refreshSessionAgentTabs(sessionId)
-    return tab
+    return this.bindAgentTab(tab, sessionId)
   }
 
   private async agentTabForRequest(sessionId: string, request: DesktopBrowserAgentRequest): Promise<BrowserTabRuntime> {
@@ -1152,8 +1663,15 @@ export class DesktopBrowserService extends EventEmitter {
       agentActive: sessionId === undefined ? false : this.agentStatuses.get(sessionId) === true,
       snapshotVersion: 0,
       navigationVersion: 0,
+      lastNavigationKind: 'document',
+      inflightRequests: new Set(),
+      inflightRequestDetails: new Map(),
+      networkActivityVersion: 0,
+      networkIdleSince: Date.now(),
+      lastOpened: new Date().toISOString(),
       snapshotTargets: new Map(),
       backgroundViewportActive: false,
+      syntheticBlankHistory: true,
       historyTimer: undefined,
       consoleLogs: [],
       debuggerConfigured: false,
@@ -1201,6 +1719,7 @@ export class DesktopBrowserService extends EventEmitter {
     })
     contents.on('did-navigate', () => {
       tab.navigationVersion += 1
+      tab.lastNavigationKind = 'document'
       this.invalidateTabSnapshot(tab)
       this.capturePageState(tab)
       this.scheduleHistoryRecord(tab)
@@ -1208,6 +1727,7 @@ export class DesktopBrowserService extends EventEmitter {
     })
     contents.on('did-navigate-in-page', () => {
       tab.navigationVersion += 1
+      tab.lastNavigationKind = 'same-document'
       this.invalidateTabSnapshot(tab)
       this.capturePageState(tab)
       this.scheduleHistoryRecord(tab)
@@ -1276,6 +1796,7 @@ export class DesktopBrowserService extends EventEmitter {
     this.tabs.clear()
     this.sessionTabs.clear()
     this.sessionActiveTabs.clear()
+    this.pageAssetInventories.clear()
   }
 
   private async openChildTab(parent: BrowserTabRuntime, url: string): Promise<void> {
@@ -1395,8 +1916,34 @@ export class DesktopBrowserService extends EventEmitter {
         return
       }
       if (method === 'Page.javascriptDialogClosed') delete tab.jsDialog
+      if (method === 'Network.requestWillBeSent') {
+        const requestId = payload.requestId
+        const resourceType = payload.type
+        if (typeof requestId !== 'string' || resourceType === 'WebSocket' || resourceType === 'EventSource') return
+        tab.inflightRequests.add(requestId)
+        tab.networkActivityVersion = (tab.networkActivityVersion ?? 0) + 1
+        const request = payload.request !== null && typeof payload.request === 'object'
+          ? payload.request as Record<string, unknown>
+          : {}
+        tab.inflightRequestDetails ??= new Map()
+        tab.inflightRequestDetails.set(requestId, {
+          url: typeof request.url === 'string' ? request.url : '',
+          type: typeof resourceType === 'string' ? resourceType : 'Other',
+          startedAt: Date.now(),
+        })
+        tab.networkIdleSince = Number.POSITIVE_INFINITY
+        return
+      }
+      if (method === 'Network.loadingFinished' || method === 'Network.loadingFailed') {
+        const requestId = payload.requestId
+        if (typeof requestId !== 'string') return
+        tab.inflightRequests.delete(requestId)
+        tab.inflightRequestDetails?.delete(requestId)
+        if (tab.inflightRequests.size === 0) tab.networkIdleSince = Date.now()
+      }
     })
     await contents.debugger.sendCommand('Page.enable')
+    await contents.debugger.sendCommand('Network.enable')
     await contents.debugger.sendCommand('Page.setInterceptFileChooserDialog', { enabled: true })
   }
 
@@ -1852,36 +2399,58 @@ export class DesktopBrowserService extends EventEmitter {
       throw new Error('attribute 必须是非空字符串。')
     }
     const selection = operation === 'select-option' ? request.values : undefined
-    if (selection !== undefined && (!Array.isArray(selection) || selection.length === 0 || selection.some((entry) => typeof entry !== 'string'))) {
-      throw new Error('values 必须是非空字符串数组。')
+    if (selection !== undefined && (!Array.isArray(selection) || selection.length === 0 || selection.some((entry) => {
+      if (typeof entry === 'string') return entry.length === 0
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return true
+      const value = entry as Record<string, unknown>
+      const keys = ['value', 'label', 'index'].filter((key) => value[key] !== undefined)
+      return keys.length === 0
+        || (value.value !== undefined && typeof value.value !== 'string')
+        || (value.label !== undefined && typeof value.label !== 'string')
+        || (value.index !== undefined && (typeof value.index !== 'number' || !Number.isSafeInteger(value.index) || value.index < 0))
+    }))) {
+      throw new Error('values 必须是非空的字符串或 option 描述符数组。')
     }
+    const evaluation = operation === 'evaluate' || operation === 'evaluate-all'
+      ? prepareReadOnlyEvaluation(request)
+      : undefined
     const frameDomAction = target.frame !== undefined
     const domClickCount = operation === 'click' && (!tab.view.getVisible() || frameDomAction)
       ? request.clickCount === undefined ? 1 : positiveInteger(request.clickCount, 'clickCount', 1, 3)
       : 0
-    const domInput = (!tab.view.getVisible() || frameDomAction) && (operation === 'fill' || operation === 'type')
+    const domClickButton = operation === 'click' ? mouseButton(request.button) : mouseButton(undefined)
+    const domClickModifiers = operation === 'click' ? inputModifierState(request.modifiers) : inputModifierState(undefined)
+    const domInput = ((!tab.view.getVisible() || frameDomAction) && (operation === 'fill' || operation === 'type'))
+      || operation === 'press-sequentially'
       ? request.value
       : undefined
     const domKey = operation === 'press' && (!tab.view.getVisible() || frameDomAction) ? request.key : undefined
     const domFocus = operation === 'focus'
     const domChecked = operation === 'set-checked' ? request.checked : undefined
-    const expression = `(() => {
+    const expression = `(async () => {
       try {
         const plan = ${JSON.stringify(locatorPlan)};
         const operation = ${JSON.stringify(operation)};
         const attribute = ${JSON.stringify(attribute)};
         const selection = ${JSON.stringify(selection)};
         const domClickCount = ${String(domClickCount)};
+        const domClickButton = ${String(domClickButton.dom)};
+        const domClickModifiers = ${JSON.stringify(domClickModifiers)};
         const domInput = ${JSON.stringify(domInput)};
         const domKey = ${JSON.stringify(domKey)};
         const domFocus = ${String(domFocus)};
         const domChecked = ${JSON.stringify(domChecked)};
+        const evaluationCallable = ${evaluation === undefined ? 'undefined' : `(${evaluation.source})`};
+        const evaluationArgument = ${evaluation?.argument ?? 'null'};
         const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
         const matches = (actual, expected, exact) => {
           const left = normalize(actual);
           const right = normalize(expected);
           return exact ? left === right : left.toLocaleLowerCase().includes(right.toLocaleLowerCase());
         };
+        const matchesMatcher = (actual, matcher, exact = false) => matcher?.namePattern !== undefined
+          ? new RegExp(matcher.namePattern, matcher.nameFlags || '').test(normalize(actual))
+          : matches(actual, matcher?.value || '', exact);
         const labelledText = (element) => {
           const aria = element.getAttribute('aria-label');
           if (aria) return normalize(aria);
@@ -2038,8 +2607,11 @@ export class DesktopBrowserService extends EventEmitter {
               const filter = JSON.parse(step.value);
               roots = roots.filter((element) => {
                 const text = normalize(element.innerText || element.textContent || '');
-                return (filter.hasText === undefined || matches(text, filter.hasText, false))
-                  && (filter.hasNotText === undefined || !matches(text, filter.hasNotText, false));
+                return (filter.hasText === undefined || matchesMatcher(text, filter.hasText))
+                  && (filter.hasNotText === undefined || !matchesMatcher(text, filter.hasNotText))
+                  && (filter.has === undefined || resolveSteps(filter.has, [element], depth + 1).length > 0)
+                  && (filter.hasNot === undefined || resolveSteps(filter.hasNot, [element], depth + 1).length === 0)
+                  && (filter.visible === undefined || visible(element) === filter.visible);
               });
               continue;
             }
@@ -2052,15 +2624,16 @@ export class DesktopBrowserService extends EventEmitter {
             let candidates = unique(roots.flatMap(descendants)).filter((element) => !['script', 'style', 'noscript', 'template'].includes(element.tagName.toLowerCase()));
             if (step.kind === 'role') {
               candidates = candidates.filter((element) => implicitRole(element) === step.value
-                && (step.name === undefined || matches(accessibleName(element), step.name, step.exact === true)));
+                && (step.name === undefined || matches(accessibleName(element), step.name, step.exact === true))
+                && (step.namePattern === undefined || new RegExp(step.namePattern, step.nameFlags || '').test(accessibleName(element))));
             } else if (step.kind === 'text') {
-              const matched = candidates.filter((element) => matches(element.innerText || element.textContent || '', step.value, step.exact === true));
+              const matched = candidates.filter((element) => matchesMatcher(element.innerText || element.textContent || '', step, step.exact === true));
               candidates = matched.filter((element) => ![...element.children]
-                .some((child) => matches(child.innerText || child.textContent || '', step.value, step.exact === true)));
+                .some((child) => matchesMatcher(child.innerText || child.textContent || '', step, step.exact === true)));
             } else if (step.kind === 'label') {
-              candidates = candidates.filter((element) => matches(labelledText(element), step.value, step.exact === true));
+              candidates = candidates.filter((element) => matchesMatcher(labelledText(element), step, step.exact === true));
             } else if (step.kind === 'placeholder') {
-              candidates = candidates.filter((element) => matches(element.getAttribute('placeholder'), step.value, step.exact === true));
+              candidates = candidates.filter((element) => matchesMatcher(element.getAttribute('placeholder'), step, step.exact === true));
             } else if (step.kind === 'testid') {
               candidates = candidates.filter((element) => element.getAttribute('data-testid') === step.value);
             }
@@ -2070,7 +2643,7 @@ export class DesktopBrowserService extends EventEmitter {
         };
         const roots = resolveSteps(plan);
         const elements = roots.filter((value) => value instanceof Element);
-        if (elements.length === 1 && ['click', 'fill', 'type', 'press', 'select-option'].includes(operation)) {
+        if (elements.length === 1 && ['click', 'fill', 'type', 'press', 'press-sequentially', 'select-option', 'download-media'].includes(operation)) {
           elements[0].scrollIntoView({ block: 'center', inline: 'center' });
         }
         const first = elements[0];
@@ -2092,14 +2665,31 @@ export class DesktopBrowserService extends EventEmitter {
             textContent: first.textContent === null ? null : String(first.textContent).slice(0, 20000),
             ...(attribute === undefined ? {} : { attribute: first.getAttribute(attribute) }),
           };
+          if (operation === 'download-media') {
+            const source = first.currentSrc || first.href || first.src || first.getAttribute('href') || first.getAttribute('src');
+            if (source) result.mediaUrl = new URL(source, document.baseURI).href;
+          }
+        }
+        if ((operation === 'evaluate' || operation === 'evaluate-all') && evaluationCallable !== undefined) {
+          if (typeof evaluationCallable !== 'function') return { ...result, error: 'Locator evaluate requires a callable function' };
+          if (operation === 'evaluate' && elements.length === 1) {
+            result.evaluation = await Promise.resolve(evaluationCallable(first, evaluationArgument));
+          } else if (operation === 'evaluate-all') {
+            result.evaluation = await Promise.resolve(evaluationCallable(elements, evaluationArgument));
+          }
         }
         if (operation === 'select-option' && elements.length === 1) {
           if (!(first instanceof HTMLSelectElement)) return { ...result, error: 'Locator does not resolve to a native select element' };
           if (!visible(first)) return { ...result, error: 'Locator resolves to a hidden select element' };
           if (!enabled(first)) return { ...result, error: 'Locator resolves to a disabled select element' };
           const requested = selection;
-          const matched = [...first.options].filter((option) => requested.includes(option.value)
-            || requested.includes(option.label) || requested.includes(option.text.trim()));
+          const options = [...first.options];
+          const matched = requested.flatMap((entry) => {
+            if (typeof entry === 'string') return options.filter((option) => option.value === entry);
+            return options.filter((option, index) => (entry.value === undefined || option.value === entry.value)
+              && (entry.label === undefined || option.label === entry.label || option.text.trim() === entry.label)
+              && (entry.index === undefined || index === entry.index));
+          }).filter((option, index, values) => values.indexOf(option) === index);
           if (matched.length === 0) return { ...result, error: 'No requested option exists in the select element' };
           const selected = first.multiple ? matched : matched.slice(0, 1);
           const selectedSet = new Set(selected);
@@ -2112,8 +2702,17 @@ export class DesktopBrowserService extends EventEmitter {
         if (operation === 'click' && domClickCount > 0 && elements.length === 1) {
           if (!visible(first)) return { ...result, error: 'Locator resolves to a hidden element' };
           if (!enabled(first)) return { ...result, error: 'Locator resolves to a disabled element' };
-          if (typeof first.click !== 'function') return { ...result, error: 'Locator does not resolve to a clickable element' };
-          for (let count = 0; count < domClickCount; count += 1) first.click();
+          if (typeof first.dispatchEvent !== 'function') return { ...result, error: 'Locator does not resolve to a clickable element' };
+          const rect = first.getBoundingClientRect();
+          for (let count = 1; count <= domClickCount; count += 1) {
+            const common = { bubbles: true, composed: true, cancelable: true, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2,
+              button: domClickButton, detail: count, ...domClickModifiers };
+            first.dispatchEvent(new MouseEvent('mousedown', common));
+            first.dispatchEvent(new MouseEvent('mouseup', common));
+            first.dispatchEvent(new MouseEvent('click', common));
+            if (domClickButton === 2) first.dispatchEvent(new MouseEvent('contextmenu', common));
+          }
+          if (domClickCount === 2) first.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, composed: true, cancelable: true, button: domClickButton, detail: 2, ...domClickModifiers }));
           result.domAction = 'click';
         }
         if ((operation === 'fill' || operation === 'type') && domInput !== undefined && elements.length === 1) {
@@ -2123,6 +2722,16 @@ export class DesktopBrowserService extends EventEmitter {
           if (!setEditableValue(first, nextValue)) return { ...result, error: 'Locator does not resolve to an editable element' };
           if (operation === 'fill') first.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
           result.domAction = operation;
+        }
+        if (operation === 'press-sequentially' && typeof domInput === 'string' && elements.length === 1) {
+          if (!visible(first)) return { ...result, error: 'Locator resolves to a hidden element' };
+          if (!enabled(first)) return { ...result, error: 'Locator resolves to a disabled element' };
+          if (editableValue(first) === undefined) return { ...result, error: 'Locator does not resolve to an editable element' };
+          for (const character of domInput) {
+            const current = editableValue(first) || '';
+            if (!setEditableValue(first, current + character)) return { ...result, error: 'Unable to type sequentially into this element' };
+          }
+          result.domAction = 'type';
         }
         if (operation === 'press' && domKey !== undefined && elements.length === 1) {
           if (!visible(first)) return { ...result, error: 'Locator resolves to a hidden element' };
@@ -2231,39 +2840,50 @@ export class DesktopBrowserService extends EventEmitter {
     const supported = new Set([
       'count', 'click', 'fill', 'type', 'press', 'select-option', 'inner-text', 'text-content',
       'get-attribute', 'is-visible', 'is-enabled', 'wait-for', 'focus', 'all-text-contents', 'set-checked',
+      'evaluate', 'evaluate-all', 'download-media', 'press-sequentially',
     ])
     if (!supported.has(operation)) throw new Error(`不支持的 Locator 操作：${operation}`)
-    if ((operation === 'fill' || operation === 'type') && typeof request.value !== 'string') throw new Error('value 必须是字符串。')
+    if ((operation === 'fill' || operation === 'type' || operation === 'press-sequentially') && typeof request.value !== 'string') throw new Error('value 必须是字符串。')
     if (operation === 'press' && (typeof request.key !== 'string' || request.key.length === 0)) throw new Error('key 必须是非空字符串。')
     if (operation === 'set-checked' && typeof request.checked !== 'boolean') throw new Error('checked 必须是布尔值。')
     const plan = parseLocatorPlan(request)
     if (operation === 'wait-for') return await this.waitForLocator(tab, plan, request)
-    const actionable = new Set(['click', 'fill', 'type', 'press', 'select-option', 'focus', 'set-checked'])
-    const resolution = actionable.has(operation)
-      ? await this.resolveActionableLocator(tab, plan, operation, request)
-      : await this.resolveLocator(tab, plan, operation, request)
+    const actionable = new Set(['click', 'fill', 'type', 'press', 'press-sequentially', 'select-option', 'focus', 'set-checked', 'download-media'])
+    const work = actionable.has(operation)
+      ? this.resolveActionableLocator(tab, plan, operation, request)
+      : this.resolveLocator(tab, plan, operation, request)
+    const evaluation = operation === 'evaluate' || operation === 'evaluate-all' ? prepareReadOnlyEvaluation(request) : undefined
+    const resolution = evaluation === undefined
+      ? await work
+      : await Promise.race([
+          work,
+          new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error(`evaluate 超时（${String(evaluation.timeoutMs)}ms）。`)), evaluation.timeoutMs)),
+        ])
     if (operation === 'count') return { ok: true, tabId: tab.id, operation, count: resolution.count }
     if (operation === 'is-visible') return { ok: true, tabId: tab.id, operation, value: resolution.first?.visible === true }
     if (operation === 'is-enabled') return { ok: true, tabId: tab.id, operation, value: resolution.first?.enabled === true }
     if (operation === 'all-text-contents') return { ok: true, tabId: tab.id, operation, values: resolution.textContents ?? [] }
+    if (operation === 'evaluate-all') return { ok: true, tabId: tab.id, operation, value: resolution.evaluation ?? null }
     const match = strictLocator(resolution)
+    if (operation === 'evaluate') return { ok: true, tabId: tab.id, operation, value: resolution.evaluation ?? null }
     if (operation === 'inner-text') return { ok: true, tabId: tab.id, operation, value: match.innerText }
     if (operation === 'text-content') return { ok: true, tabId: tab.id, operation, value: match.textContent }
     if (operation === 'get-attribute') return { ok: true, tabId: tab.id, operation, value: match.attribute ?? null }
     if (!match.visible) throw new Error('Locator 匹配的元素当前不可见。')
     if (!match.enabled) throw new Error('Locator 匹配的元素当前不可用。')
-    if (resolution.domAction === operation) {
+    if (resolution.domAction === operation || (operation === 'press-sequentially' && resolution.domAction === 'type')) {
       this.invalidateTabSnapshot(tab)
       if (operation === 'click') {
         return { ok: true, tabId: tab.id, operation, clickCount: request.clickCount ?? 1, method: 'dom' }
       }
       if (operation === 'fill' || operation === 'type') return { ok: true, tabId: tab.id, operation, characters: String(request.value).length, method: 'dom' }
+      if (operation === 'press-sequentially') return { ok: true, tabId: tab.id, operation, characters: String(request.value).length, method: 'dom' }
       if (operation === 'press') return { ok: true, tabId: tab.id, operation, key: request.key, method: 'dom' }
       if (operation === 'focus') return { ok: true, tabId: tab.id, operation, method: 'dom' }
       if (operation === 'set-checked') return { ok: true, tabId: tab.id, operation, checked: resolution.checked, method: 'dom' }
     }
     if (operation === 'click') {
-      const result = await this.click(tab, { x: match.x, y: match.y, clickCount: request.clickCount })
+      const result = await this.click(tab, { x: match.x, y: match.y, clickCount: request.clickCount, button: request.button, keypress: request.modifiers })
       return { ...result, operation }
     }
     if (operation === 'fill' || operation === 'type') {
@@ -2288,20 +2908,29 @@ export class DesktopBrowserService extends EventEmitter {
         labels: resolution.selectedLabels ?? [],
       }
     }
+    if (operation === 'download-media') {
+      if (typeof resolution.mediaUrl !== 'string' || !/^https?:\/\//iu.test(resolution.mediaUrl)) {
+        throw new Error('Locator 没有可下载的 HTTP(S) 媒体地址。')
+      }
+      tab.view.webContents.downloadURL(resolution.mediaUrl)
+      return { ok: true, tabId: tab.id, operation }
+    }
     throw new Error(`不支持的 Locator 操作：${operation}`)
   }
 
   private async hover(tab: BrowserTabRuntime, request: DesktopBrowserAgentRequest): Promise<Record<string, unknown>> {
     const target = targetFromRequest(tab, request)
+    const modifiers = inputModifierState(request.keypress)
     if (!tab.view.getVisible()) {
       const response = await this.debuggerCommandFor(tab, 'Runtime.evaluate', {
         expression: `(() => {
           const x = ${JSON.stringify(target.x)}, y = ${JSON.stringify(target.y)};
           const element = document.elementFromPoint(x, y);
           if (!element) return false;
-          element.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, composed: true, clientX: x, clientY: y }));
-          element.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false, composed: true, clientX: x, clientY: y }));
-          element.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, composed: true, clientX: x, clientY: y }));
+          const modifiers = ${JSON.stringify(modifiers)};
+          element.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, composed: true, clientX: x, clientY: y, ...modifiers }));
+          element.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false, composed: true, clientX: x, clientY: y, ...modifiers }));
+          element.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, composed: true, clientX: x, clientY: y, ...modifiers }));
           return true;
         })()`,
         returnByValue: true,
@@ -2310,7 +2939,7 @@ export class DesktopBrowserService extends EventEmitter {
       return { ok: true, tabId: tab.id, x: Math.round(target.x), y: Math.round(target.y), method: 'dom' }
     }
     await this.pointer(tab, target.x, target.y, false)
-    await this.debuggerCommandFor(tab, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: target.x, y: target.y })
+    await this.debuggerCommandFor(tab, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: target.x, y: target.y, modifiers: modifiers.mask })
     this.invalidateTabSnapshot(tab)
     return { ok: true, tabId: tab.id, x: Math.round(target.x), y: Math.round(target.y) }
   }
@@ -2451,70 +3080,81 @@ export class DesktopBrowserService extends EventEmitter {
   private async click(tab: BrowserTabRuntime, request: DesktopBrowserAgentRequest): Promise<Record<string, unknown>> {
     const target = targetFromRequest(tab, request)
     const clickCount = request.clickCount === undefined ? 1 : positiveInteger(request.clickCount, 'clickCount', 1, 3)
+    const button = mouseButton(request.button)
+    const modifiers = inputModifierState(request.keypress ?? request.modifiers)
+    if (!tab.view.getVisible() && (button.cdp === 'back' || button.cdp === 'forward')) {
+      return await this.historyNavigationFor(tab, button.cdp)
+    }
     if (!tab.view.getVisible()) {
       const response = await this.debuggerCommandFor(tab, 'Runtime.evaluate', {
         expression: `(() => {
           const x = ${JSON.stringify(target.x)}, y = ${JSON.stringify(target.y)}, clickCount = ${String(clickCount)};
+          const button = ${String(button.dom)}, modifiers = ${JSON.stringify(modifiers)};
           const element = document.elementFromPoint(x, y);
           if (!(element instanceof HTMLElement)) return false;
           element.focus({ preventScroll: true });
-          element.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, composed: true, clientX: x, clientY: y }));
+          element.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, composed: true, clientX: x, clientY: y, ...modifiers }));
           for (let count = 1; count <= clickCount; count += 1) {
-            const common = { bubbles: true, composed: true, cancelable: true, clientX: x, clientY: y, button: 0, detail: count };
+            const common = { bubbles: true, composed: true, cancelable: true, clientX: x, clientY: y, button, detail: count, ...modifiers };
             element.dispatchEvent(new MouseEvent('mousedown', common));
             element.dispatchEvent(new MouseEvent('mouseup', common));
             element.dispatchEvent(new MouseEvent('click', common));
+            if (button === 2) element.dispatchEvent(new MouseEvent('contextmenu', common));
           }
-          if (clickCount === 2) element.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, composed: true, cancelable: true, clientX: x, clientY: y, button: 0, detail: 2 }));
+          if (clickCount === 2) element.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, composed: true, cancelable: true, clientX: x, clientY: y, button, detail: 2, ...modifiers }));
           return true;
         })()`,
         returnByValue: true,
       }) as { result?: { value?: unknown } }
       if (response.result?.value !== true) throw new Error('坐标处没有可点击的网页元素。')
       this.invalidateTabSnapshot(tab)
-      return { ok: true, tabId: tab.id, x: Math.round(target.x), y: Math.round(target.y), clickCount, method: 'dom' }
+      return { ok: true, tabId: tab.id, x: Math.round(target.x), y: Math.round(target.y), clickCount, button: button.cdp, method: 'dom' }
     }
-    await this.pointer(tab, target.x, target.y, false)
-    await this.debuggerCommandFor(tab, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: target.x, y: target.y })
+    if (button.cdp === 'left') await this.pointer(tab, target.x, target.y, false)
+    await this.debuggerCommandFor(tab, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: target.x, y: target.y, modifiers: modifiers.mask })
     for (let count = 1; count <= clickCount; count += 1) {
-      await this.pointer(tab, target.x, target.y, true)
-      await this.debuggerCommandFor(tab, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: target.x, y: target.y, button: 'left', clickCount: count })
-      await this.debuggerCommandFor(tab, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: target.x, y: target.y, button: 'left', clickCount: count })
+      if (button.cdp === 'left') await this.pointer(tab, target.x, target.y, true)
+      await this.debuggerCommandFor(tab, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: target.x, y: target.y, button: button.cdp, clickCount: count, modifiers: modifiers.mask })
+      await this.debuggerCommandFor(tab, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: target.x, y: target.y, button: button.cdp, clickCount: count, modifiers: modifiers.mask })
       if (count < clickCount) await new Promise<void>((resolve) => setTimeout(resolve, 55))
     }
-    await this.pointer(tab, target.x, target.y, false)
+    if (button.cdp === 'left') await this.pointer(tab, target.x, target.y, false)
     this.invalidateTabSnapshot(tab)
-    return { ok: true, tabId: tab.id, x: Math.round(target.x), y: Math.round(target.y), clickCount }
+    return { ok: true, tabId: tab.id, x: Math.round(target.x), y: Math.round(target.y), clickCount, button: button.cdp }
   }
 
   private async drag(tab: BrowserTabRuntime, request: DesktopBrowserAgentRequest): Promise<Record<string, unknown>> {
     if (request.startRef !== undefined && typeof request.startRef !== 'number') throw new Error('startRef 必须是整数。')
     if (request.endRef !== undefined && typeof request.endRef !== 'number') throw new Error('endRef 必须是整数。')
-    const start = targetFromRequest(tab, {
-      ref: request.startRef,
-      snapshotVersion: request.snapshotVersion,
-      x: request.startX,
-      y: request.startY,
-    })
-    const end = targetFromRequest(tab, {
-      ref: request.endRef,
-      snapshotVersion: request.snapshotVersion,
-      x: request.endX,
-      y: request.endY,
-    })
+    const path = request.path === undefined
+      ? [
+          targetFromRequest(tab, { ref: request.startRef, snapshotVersion: request.snapshotVersion, x: request.startX, y: request.startY }),
+          targetFromRequest(tab, { ref: request.endRef, snapshotVersion: request.snapshotVersion, x: request.endX, y: request.endY }),
+        ]
+      : (() => {
+          if (!Array.isArray(request.path) || request.path.length < 2 || request.path.length > 120) throw new Error('path 必须包含 2–120 个坐标点。')
+          return request.path.map((point) => {
+            if (point === null || typeof point !== 'object' || Array.isArray(point)) throw new Error('path 坐标格式无效。')
+            const value = point as Record<string, unknown>
+            return { x: finiteCoordinate(value.x, 'path.x'), y: finiteCoordinate(value.y, 'path.y') }
+          })
+        })()
+    const start = path[0]!
+    const end = path.at(-1)!
+    const modifiers = inputModifierState(request.keypress)
     const durationMs = request.durationMs === undefined ? 450 : positiveInteger(request.durationMs, 'durationMs', 100, 2_000)
     if (!tab.view.getVisible()) {
       const response = await this.debuggerCommandFor(tab, 'Runtime.evaluate', {
         expression: `(() => {
-          const start = ${JSON.stringify(start)}, end = ${JSON.stringify(end)};
+          const path = ${JSON.stringify(path)}, start = path[0], end = path.at(-1), modifiers = ${JSON.stringify(modifiers)};
           const source = document.elementFromPoint(start.x, start.y);
           const target = document.elementFromPoint(end.x, end.y);
           if (!(source instanceof HTMLElement) || !(target instanceof HTMLElement)) return false;
           const data = typeof DataTransfer === 'function' ? new DataTransfer() : undefined;
-          const mouse = (element, type, point, buttons) => element.dispatchEvent(new MouseEvent(type, { bubbles: true, composed: true, cancelable: true, clientX: point.x, clientY: point.y, button: 0, buttons }));
+          const mouse = (element, type, point, buttons) => element.dispatchEvent(new MouseEvent(type, { bubbles: true, composed: true, cancelable: true, clientX: point.x, clientY: point.y, button: 0, buttons, ...modifiers }));
           mouse(source, 'mousedown', start, 1);
           if (typeof DragEvent === 'function') source.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: data }));
-          mouse(target, 'mousemove', end, 1);
+          for (const point of path.slice(1)) mouse(document.elementFromPoint(point.x, point.y) || target, 'mousemove', point, 1);
           if (typeof DragEvent === 'function') {
             target.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: data }));
             target.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: data }));
@@ -2529,24 +3169,28 @@ export class DesktopBrowserService extends EventEmitter {
       this.invalidateTabSnapshot(tab)
       return { ok: true, tabId: tab.id, start, end, durationMs, method: 'dom' }
     }
-    const steps = Math.max(4, Math.min(30, Math.round(durationMs / 50)))
+    const steps = Math.max(path.length - 1, Math.min(60, Math.round(durationMs / 40)))
     await this.pointer(tab, start.x, start.y, false)
     await this.debuggerCommandFor(tab, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: start.x, y: start.y })
     let pressed = false
     try {
       await this.pointer(tab, start.x, start.y, true)
-      await this.debuggerCommandFor(tab, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: start.x, y: start.y, button: 'left', clickCount: 1 })
+      await this.debuggerCommandFor(tab, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: start.x, y: start.y, button: 'left', clickCount: 1, modifiers: modifiers.mask })
       pressed = true
       for (let step = 1; step <= steps; step += 1) {
         const progress = step / steps
-        const x = start.x + (end.x - start.x) * progress
-        const y = start.y + (end.y - start.y) * progress
-        await this.debuggerCommandFor(tab, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'left', buttons: 1 })
+        const segmentProgress = progress * (path.length - 1)
+        const segment = Math.min(path.length - 2, Math.floor(segmentProgress))
+        const local = segmentProgress - segment
+        const from = path[segment]!, to = path[segment + 1]!
+        const x = from.x + (to.x - from.x) * local
+        const y = from.y + (to.y - from.y) * local
+        await this.debuggerCommandFor(tab, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'left', buttons: 1, modifiers: modifiers.mask })
         await this.pointer(tab, x, y, true)
         if (step < steps) await new Promise<void>((resolve) => setTimeout(resolve, Math.round(durationMs / steps)))
       }
     } finally {
-      if (pressed) await this.debuggerCommandFor(tab, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: end.x, y: end.y, button: 'left', clickCount: 1 }).catch(() => undefined)
+      if (pressed) await this.debuggerCommandFor(tab, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: end.x, y: end.y, button: 'left', clickCount: 1, modifiers: modifiers.mask }).catch(() => undefined)
       await this.pointer(tab, end.x, end.y, false)
     }
     this.invalidateTabSnapshot(tab)
@@ -2603,6 +3247,7 @@ export class DesktopBrowserService extends EventEmitter {
   }
 
   private async scroll(tab: BrowserTabRuntime, request: DesktopBrowserAgentRequest): Promise<Record<string, unknown>> {
+    const modifiers = inputModifierState(request.keypress)
     if (request.top !== undefined || request.left !== undefined) {
       const top = request.top === undefined ? undefined : finiteCoordinate(request.top, 'top')
       const left = request.left === undefined ? undefined : finiteCoordinate(request.left, 'left')
@@ -2636,6 +3281,7 @@ export class DesktopBrowserService extends EventEmitter {
           const y = ${JSON.stringify(y)};
           const deltaX = ${JSON.stringify(deltaX)};
           const deltaY = ${JSON.stringify(deltaY)};
+          const modifiers = ${JSON.stringify(modifiers)};
           let target = document.elementFromPoint(x, y);
           let scroller;
           while (target && target !== document.documentElement) {
@@ -2645,6 +3291,7 @@ export class DesktopBrowserService extends EventEmitter {
             if (scrollsX || scrollsY) { scroller = target; break; }
             target = target.parentElement;
           }
+          (target || document).dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, clientX: x, clientY: y, deltaX, deltaY, ...modifiers }));
           if (scroller) scroller.scrollBy({ left: deltaX, top: deltaY, behavior: 'instant' });
           else scrollBy({ left: deltaX, top: deltaY, behavior: 'instant' });
           return {
@@ -2668,7 +3315,7 @@ export class DesktopBrowserService extends EventEmitter {
       }
     }
     await this.pointer(tab, x, y, false)
-    await this.debuggerCommandFor(tab, 'Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX, deltaY })
+    await this.debuggerCommandFor(tab, 'Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX, deltaY, modifiers: modifiers.mask })
     this.invalidateTabSnapshot(tab)
     return { ok: true, tabId: tab.id, deltaX, deltaY }
   }

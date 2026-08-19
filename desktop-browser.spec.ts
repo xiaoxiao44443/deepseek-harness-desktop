@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { normalizeBrowserAddress, normalizeBrowserSettings } from './src/main/desktop-browser.js'
-import { evaluatePage, parseLocatorPlan } from './src/main/desktop-browser-automation.js'
+import {
+  evaluatePage,
+  parseLocatorPlan,
+  runNavigationWithRetry,
+  waitForNavigationStability,
+  type BrowserNavigationState,
+} from './src/main/desktop-browser-automation.js'
 import type { BrowserTabRuntime } from './src/main/desktop-browser-types.js'
 import { BROWSER_CONTROL_DOCUMENTATION, BROWSER_SKILL, createBrowserTools } from './resources/dsh-desktop-browser/lib/index.js'
 
@@ -35,13 +41,14 @@ describe('desktop browser settings', () => {
 describe('desktop browser automation helpers', () => {
   it('parses locator plans outside the Electron window controller', () => {
     expect(parseLocatorPlan({ locator: [
-      { kind: 'role', value: 'button', name: '保存', exact: true },
+      { kind: 'role', value: 'button', namePattern: '保存|Save', nameFlags: 'iu', exact: true },
       { kind: 'nth', value: '0' },
     ] })).toEqual([
-      { kind: 'role', value: 'button', name: '保存', exact: true },
+      { kind: 'role', value: 'button', namePattern: '保存|Save', nameFlags: 'iu', exact: true },
       { kind: 'nth', value: '0' },
     ])
     expect(() => parseLocatorPlan({ locator: [{ kind: 'nth', value: 'first' }] })).toThrow('nth')
+    expect(() => parseLocatorPlan({ locator: [{ kind: 'role', value: 'link', namePattern: '[' }] })).toThrow('正则')
   })
 
   it('keeps page evaluation read-only after moving it out of the controller', async () => {
@@ -53,7 +60,184 @@ describe('desktop browser automation helpers', () => {
       value: { title: 'Example' },
     })
     await expect(evaluatePage(tab, { script: '() => fetch("https://example.com")' }, command)).rejects.toThrow('只读')
-    expect(command).toHaveBeenCalledTimes(1)
+    await expect(evaluatePage(tab, { script: '() => window.history.length' }, command)).resolves.toEqual({
+      ok: true,
+      tabId: 'agent-test',
+      value: { title: 'Example' },
+    })
+    await expect(evaluatePage(tab, {
+      script: `() => ({
+        url: location.href,
+        title: document.title,
+        h1: Array.from(document.querySelectorAll('h1')).map((element) => element.textContent),
+      })`,
+    }, command)).resolves.toEqual({
+      ok: true,
+      tabId: 'agent-test',
+      value: { title: 'Example' },
+    })
+    await expect(evaluatePage(tab, { script: '() => window.history.back()' }, command)).rejects.toThrow('只读')
+    await expect(evaluatePage(tab, { script: '() => { location.href = "https://example.com/next" }' }, command)).rejects.toThrow('只读')
+    await expect(evaluatePage(tab, { script: '() => location.assign("https://example.com/next")' }, command)).rejects.toThrow('只读')
+    await expect(evaluatePage(tab, { script: '() => history.pushState({}, "", "/next")' }, command)).rejects.toThrow('只读')
+    expect(command).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not treat unchanged SPA title, H1, or text as a generic navigation blocker', async () => {
+    const before: BrowserNavigationState = {
+      version: 1,
+      url: 'https://example.com/quickstart',
+      title: 'Quickstart',
+      h1: 'Quickstart',
+      text: 'Old page',
+      readyState: 'complete',
+      loading: false,
+      inflightRequests: 0,
+      networkIdleMs: 1_000,
+      kind: 'same-document',
+    }
+    const tab = {
+      id: 'agent-spa',
+      navigationVersion: 2,
+      lastNavigationKind: 'same-document',
+      loading: false,
+      inflightRequests: new Set(),
+      networkIdleSince: Date.now() - 1_000,
+      view: { webContents: {
+        isDestroyed: () => false,
+        getURL: () => 'https://example.com/providers',
+        getTitle: () => 'Providers',
+      } },
+    } as unknown as BrowserTabRuntime
+    const command = vi.fn(async () => ({ result: { value: {
+      readyState: 'complete', title: 'Quickstart', h1: 'Quickstart', text: 'Old page',
+    } } }))
+    const outcome = await waitForNavigationStability(tab, before, {
+      timeoutMs: 2_000,
+      waitUntil: 'load',
+      expectedUrl: 'https://example.com/providers',
+      requireNavigation: true,
+    }, command)
+    expect(outcome).toEqual(expect.objectContaining({ status: 'success' }))
+    expect(outcome.state).toEqual(expect.objectContaining({ title: 'Quickstart', h1: 'Quickstart' }))
+    expect(outcome.elapsedMs).toBeLessThan(800)
+    expect(command).toHaveBeenCalledTimes(3)
+  })
+
+  it('distinguishes no-op from a navigation timeout', async () => {
+    const before: BrowserNavigationState = {
+      version: 1,
+      url: 'https://example.com/quickstart',
+      title: 'Quickstart',
+      h1: 'Quickstart',
+      text: 'Old page',
+      readyState: 'complete',
+      loading: false,
+      inflightRequests: 0,
+      networkIdleMs: 1_000,
+      kind: 'same-document',
+    }
+    const tab = {
+      id: 'agent-nav-state',
+      navigationVersion: 1,
+      lastNavigationKind: 'same-document',
+      loading: false,
+      inflightRequests: new Set(),
+      networkIdleSince: Date.now() - 1_000,
+      view: { webContents: {
+        isDestroyed: () => false,
+        getURL: () => before.url,
+        getTitle: () => before.title,
+      } },
+    } as unknown as BrowserTabRuntime
+    const command = vi.fn(async () => ({ result: { value: {
+      readyState: 'complete', title: before.title, h1: before.h1, text: before.text,
+    } } }))
+    const noOp = await waitForNavigationStability(tab, before, {
+      timeoutMs: 1_000,
+      waitUntil: 'load',
+      requireNavigation: false,
+      detectionTimeoutMs: 250,
+    }, command)
+    expect(noOp).toEqual(expect.objectContaining({ status: 'no-op', reason: 'no-navigation' }))
+
+    tab.navigationVersion = 2
+    const timeout = await waitForNavigationStability(tab, before, {
+      timeoutMs: 250,
+      waitUntil: 'load',
+      expectedUrl: 'https://example.com/providers',
+      requireNavigation: true,
+    }, command)
+    expect(timeout).toEqual(expect.objectContaining({ status: 'timeout', reason: 'expected-url' }))
+  })
+
+  it('waits for a real 500ms network quiet window when networkidle is requested', async () => {
+    const before: BrowserNavigationState = {
+      version: 1,
+      url: 'https://example.com/start',
+      title: 'Start',
+      h1: 'Start',
+      text: 'Start',
+      readyState: 'complete',
+      loading: false,
+      inflightRequests: 1,
+      networkIdleMs: 0,
+      kind: 'document',
+    }
+    const tab = {
+      id: 'agent-networkidle',
+      navigationVersion: 2,
+      lastNavigationKind: 'document',
+      loading: false,
+      inflightRequests: new Set(['request-1']),
+      networkIdleSince: Number.POSITIVE_INFINITY,
+      view: { webContents: {
+        isDestroyed: () => false,
+        getURL: () => 'https://example.com/next',
+        getTitle: () => 'Next',
+      } },
+    } as unknown as BrowserTabRuntime
+    let reads = 0
+    const command = vi.fn(async () => {
+      reads += 1
+      if (reads === 3) {
+        tab.inflightRequests.clear()
+        tab.networkIdleSince = Date.now() - 600
+      }
+      return { result: { value: { readyState: 'complete', title: 'Next', h1: 'Next', text: 'Next' } } }
+    })
+    const outcome = await waitForNavigationStability(tab, before, {
+      timeoutMs: 2_000,
+      waitUntil: 'networkidle',
+      expectedUrl: 'https://example.com/next',
+      requireNavigation: true,
+    }, command)
+    expect(outcome).toEqual(expect.objectContaining({ status: 'success' }))
+    expect(reads).toBeGreaterThanOrEqual(5)
+    expect(outcome.state).toEqual(expect.objectContaining({ inflightRequests: 0, networkIdleMs: expect.any(Number) }))
+  })
+
+  it('retries the same navigation action at most once', async () => {
+    const state = {
+      version: 1,
+      url: 'https://example.com/providers',
+      title: 'Providers',
+      h1: 'Providers',
+      text: 'Page',
+      readyState: 'complete',
+      loading: false,
+      kind: 'same-document' as const,
+    }
+    const action = vi.fn(async () => undefined)
+    const observe = vi.fn()
+      .mockResolvedValueOnce({ status: 'timeout', reason: 'unstable-page', state, elapsedMs: 250 })
+      .mockResolvedValueOnce({ status: 'success', state, elapsedMs: 300 })
+    await expect(runNavigationWithRetry(action, observe)).resolves.toEqual(expect.objectContaining({
+      attempts: 2,
+      outcome: expect.objectContaining({ status: 'success' }),
+    }))
+    expect(action).toHaveBeenCalledTimes(2)
+    expect(observe).toHaveBeenCalledTimes(2)
   })
 })
 
@@ -77,6 +261,9 @@ describe('desktop browser plugin', () => {
     expect(BROWSER_CONTROL_DOCUMENTATION).toContain('focus()')
     expect(BROWSER_CONTROL_DOCUMENTATION).toContain('expectNavigation')
     expect(BROWSER_CONTROL_DOCUMENTATION).toContain('waitForURL')
+    expect(BROWSER_CONTROL_DOCUMENTATION).toContain('action completion only')
+    expect(BROWSER_CONTROL_DOCUMENTATION).toContain('locator.waitFor() for business UI')
+    expect(BROWSER_CONTROL_DOCUMENTATION).not.toContain('SPA URL, title, H1, and page text have stabilized')
     expect(BROWSER_CONTROL_DOCUMENTATION).toContain('tab.cua')
     expect(BROWSER_CONTROL_DOCUMENTATION).toContain('stable element refs')
     expect(BROWSER_CONTROL_DOCUMENTATION).toContain('One script may perform several related browser actions')
@@ -121,7 +308,7 @@ await tab.cua.scroll({ x: 100, y: 120, scrollX: 0, scrollY: 500 });`,
     const bodies = fetchImpl.mock.calls.map((call) => JSON.parse(String(call[1]?.body)))
     expect(bodies.slice(1).map((body) => body.action)).toEqual(['hover', 'click', 'click', 'drag', 'press', 'type', 'scroll'])
     expect(bodies[3]).toEqual(expect.objectContaining({ clickCount: 2, x: 12, y: 22 }))
-    expect(bodies[4]).toEqual(expect.objectContaining({ startX: 1, startY: 2, endX: 8, endY: 9 }))
+    expect(bodies[4]).toEqual(expect.objectContaining({ path: [{ x: 1, y: 2 }, { x: 8, y: 9 }] }))
     expect(bodies[5]).toEqual(expect.objectContaining({ key: 'Control+A' }))
     expect(bodies[7]).toEqual(expect.objectContaining({ deltaX: 0, deltaY: 500 }))
   })
@@ -355,6 +542,49 @@ return { count, allCount: all.length, labels, tabId: tab.id };`,
     }))
   })
 
+  it('does not infer or wait for navigation after a plain locator click', async () => {
+    const fetchImpl = vi.fn(async (_url: URL, options: RequestInit) => {
+      const body = JSON.parse(String(options.body))
+      const payload = body.action === 'new'
+        ? { ok: true, tabId: 'agent-plain-click' }
+        : { ok: true, tabId: body.tabId, operation: body.operation }
+      return new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    })
+    vi.stubGlobal('fetch', fetchImpl)
+    const tool = createBrowserTools('http://127.0.0.1:12345/v1/restart-harness', 'secret')[0]
+    const output = await tool.execute({
+      code: `const tab = await browser.tabs.new();
+const result = await tab.playwright.getByRole('button', { name: 'Continue' }).click();
+return result === undefined;`,
+    }, { agent: { id: 'session-a' } })
+    expect(JSON.parse(output).result).toBe(true)
+    const bodies = fetchImpl.mock.calls.map((call) => JSON.parse(String(call[1]?.body)))
+    expect(bodies.map((body) => body.action)).toEqual(['new', 'locator'])
+    expect(bodies[1]).toEqual(expect.objectContaining({ operation: 'click', tabId: 'agent-plain-click' }))
+  })
+
+  it('serializes regular-expression accessible names for role locators', async () => {
+    const fetchImpl = vi.fn(async (_url: URL, options: RequestInit) => {
+      const body = JSON.parse(String(options.body))
+      return new Response(JSON.stringify(body.action === 'new' ? { ok: true, tabId: 'agent-regex' } : { ok: true, count: 1 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    })
+    vi.stubGlobal('fetch', fetchImpl)
+    const tool = createBrowserTools('http://127.0.0.1:12345/v1/restart-harness', 'secret')[0]
+    await tool.execute({
+      code: `const tab = await browser.tabs.new();
+return await tab.playwright.getByRole('link', { name: /配置模型|Configure models/iu }).count();`,
+    }, { agent: { id: 'session-a' } })
+    expect(JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body))).toEqual(expect.objectContaining({
+      locator: [{ kind: 'role', value: 'link', namePattern: '配置模型|Configure models', nameFlags: 'iu', exact: false }],
+    }))
+  })
+
   it('serializes nested frame locators as frame-scoped locator plans', async () => {
     const fetchImpl = vi.fn(async (_url: URL, options: RequestInit) => {
       const body = JSON.parse(String(options.body))
@@ -396,14 +626,20 @@ return await button.count();`,
     await tool.execute({
       code: `const tab = await browser.tabs.new();
 const buttons = tab.playwright.getByRole('button');
-const save = buttons.filter({ hasText: 'Save', hasNotText: 'draft' });
+const ready = tab.playwright.getByText(/ready/iu);
+const save = buttons.filter({ hasText: /Save/iu, hasNotText: 'draft', has: ready, visible: true });
 const exact = save.and(tab.playwright.getByTestId('save'));
 const either = exact.or(tab.playwright.getByText('Save now'));
 return await either.count();`,
     }, { agent: { id: 'session-a' } })
     const body = JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body))
     expect(body.locator.map((step: { kind: string }) => step.kind)).toEqual(['role', 'filter', 'and', 'or'])
-    expect(JSON.parse(body.locator[1].value)).toEqual({ hasText: 'Save', hasNotText: 'draft' })
+    expect(JSON.parse(body.locator[1].value)).toEqual({
+      hasText: { value: 'Save', namePattern: 'Save', nameFlags: 'iu' },
+      hasNotText: { value: 'draft' },
+      has: [{ kind: 'text', value: 'ready', namePattern: 'ready', nameFlags: 'iu', exact: false }],
+      visible: true,
+    })
     expect(JSON.parse(body.locator[2].value)).toEqual([{ kind: 'testid', value: 'save' }])
   })
 
@@ -425,6 +661,81 @@ return await tab.playwright.getByRole('button', { name: 'Save' }).evaluate((elem
     expect(JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body))).toEqual(expect.objectContaining({
       action: 'locator', operation: 'evaluate', argument: '', tabId: 'agent-locator-eval',
     }))
+  })
+
+  it('serializes extended locator operations and option descriptors', async () => {
+    const fetchImpl = vi.fn(async (_url: URL, options: RequestInit) => {
+      const body = JSON.parse(String(options.body))
+      const payload = body.action === 'new'
+        ? { ok: true, tabId: 'agent-locator-extended' }
+        : body.operation === 'evaluate-all'
+          ? { ok: true, value: ['A', 'B'] }
+          : { ok: true, operation: body.operation }
+      return new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json' } })
+    })
+    vi.stubGlobal('fetch', fetchImpl)
+    const tool = createBrowserTools('http://127.0.0.1:12345/v1/restart-harness', 'secret')[0]
+    const output = await tool.execute({
+      code: `const tab = await browser.tabs.new();
+const field = tab.playwright.getByLabel(/model/i);
+await field.pressSequentially('abc');
+await field.selectOption([{ label: 'DeepSeek' }, { index: 2 }]);
+await field.downloadMedia();
+return await field.evaluateAll((elements) => elements.map((element) => element.textContent));`,
+    }, { agent: { id: 'session-a' } })
+    expect(JSON.parse(output).result).toEqual(['A', 'B'])
+    const bodies = fetchImpl.mock.calls.slice(1).map((call) => JSON.parse(String(call[1]?.body)))
+    expect(bodies.map((body) => body.operation)).toEqual(['press-sequentially', 'select-option', 'download-media', 'evaluate-all'])
+    expect(bodies[1]?.values).toEqual([{ label: 'DeepSeek' }, { index: 2 }])
+    expect(bodies[0]?.locator).toEqual([{ kind: 'label', value: 'model', namePattern: 'model', nameFlags: 'i', exact: false }])
+  })
+
+  it('exposes user tabs, browser capabilities, clipboard, content export, and pageAssets', async () => {
+    const fetchImpl = vi.fn(async (_url: URL, options: RequestInit) => {
+      const body = JSON.parse(String(options.body))
+      const payloads: Record<string, unknown> = {
+        'user-tabs': { ok: true, tabs: [{ id: 'manual', providerTabId: 'manual', title: 'Manual', url: 'https://example.com/' }] },
+        'claim-tab': { ok: true, tabId: 'manual' },
+        'browser-history': { ok: true, entries: [{ dateVisited: '2026-08-20T00:00:00.000Z', url: 'https://example.com/' }] },
+        'browser-visibility': { ok: true, visible: body.visible ?? false },
+        'browser-viewport': { ok: true, viewport: body.width === undefined ? null : { width: body.width, height: body.height } },
+        'clipboard-read-text': { ok: true, text: 'copied' },
+        'content-export': { ok: true, path: 'C:/tmp/page.html' },
+        'page-assets-list': { ok: true, tabId: body.tabId, id: 'inventory-1', assets: [], inlineSvgs: [], pageUrl: 'https://example.com/', summary: { totalCount: 0 } },
+        'page-assets-bundle': { ok: true, tabId: body.tabId, assets: [], failures: [], directoryPath: 'C:/tmp/assets', manifestPath: 'C:/tmp/assets/manifest.json', summary: { requestedCount: 0 } },
+      }
+      return new Response(JSON.stringify(payloads[body.action] ?? { ok: true }), { status: 200, headers: { 'content-type': 'application/json' } })
+    })
+    vi.stubGlobal('fetch', fetchImpl)
+    const tool = createBrowserTools('http://127.0.0.1:12345/v1/restart-harness', 'secret')[0]
+    const output = await tool.execute({
+      code: `const open = await browser.user.openTabs();
+const tab = await browser.user.claimTab(open[0]);
+await browser.nameSession('API parity');
+await tab.markHandoff();
+const history = await browser.user.history({ queries: ['example'], limit: 5 });
+const visibility = await browser.capabilities.get('visibility');
+await visibility.set(false);
+const viewport = await browser.capabilities.get('viewport');
+await viewport.set({ width: 800, height: 600 });
+await viewport.reset();
+await tab.clipboard.writeText('hello');
+const copied = await tab.clipboard.readText();
+const exported = await tab.content.export();
+const assets = await tab.capabilities.get('pageAssets');
+const inventory = await assets.list();
+const bundle = await assets.bundle({ inventoryId: inventory.id, kinds: ['image'] });
+return { tabId: tab.id, history, copied, exported, inventoryId: inventory.id, manifestPath: bundle.manifestPath };`,
+    }, { agent: { id: 'session-a' } })
+    expect(JSON.parse(output).result).toEqual(expect.objectContaining({
+      tabId: 'manual', copied: 'copied', exported: 'C:/tmp/page.html', inventoryId: 'inventory-1', manifestPath: 'C:/tmp/assets/manifest.json',
+    }))
+    const actions = fetchImpl.mock.calls.map((call) => JSON.parse(String(call[1]?.body)).action)
+    expect(actions).toEqual([
+      'user-tabs', 'claim-tab', 'name-session', 'mark-tab', 'browser-history', 'browser-visibility',
+      'browser-viewport', 'browser-viewport', 'clipboard-write-text', 'clipboard-read-text',
+      'content-export', 'page-assets-list', 'page-assets-bundle',
+    ])
   })
 
   it('does not expose Node globals to browser scripts', async () => {
@@ -489,5 +800,85 @@ return tab.id;`,
       code: `await browser.tabs.list();
 throw new Error('after tabs');`,
     }, { agent: { id: 'session-a' } })).rejects.toThrow('Completed browser actions')
+  })
+
+  it('supports detailed workflows beyond the old 40-action limit', async () => {
+    const fetchImpl = vi.fn(async (_url: URL, options: RequestInit) => {
+      const body = JSON.parse(String(options.body))
+      const payload = body.action === 'new'
+        ? { ok: true, tabId: 'agent-budget' }
+        : body.action === 'tabs'
+          ? { ok: true, tabs: [{ id: 'agent-budget', url: 'https://example.com/' }] }
+          : { ok: true, tabId: body.tabId }
+      return new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json' } })
+    })
+    vi.stubGlobal('fetch', fetchImpl)
+    const tool = createBrowserTools('http://127.0.0.1:12345/v1/restart-harness', 'secret')[0]
+    const output = await tool.execute({
+      code: `const tab = await browser.tabs.new();
+try {
+  for (let index = 0; index < 60; index += 1) await browser.tabs.list();
+  return 'completed';
+} finally {
+  await tab.close();
+  await browser.tabs.finalize({ keep: [] });
+}`,
+    }, { agent: { id: 'session-a' } })
+    expect(JSON.parse(output).result).toBe('completed')
+    const actions = fetchImpl.mock.calls.map((call) => JSON.parse(String(call[1]?.body)).action)
+    expect(actions.slice(-2)).toEqual(['close', 'finalize'])
+  })
+
+  it('reserves close and finalize actions after the ordinary action budget is exhausted', async () => {
+    const fetchImpl = vi.fn(async (_url: URL, options: RequestInit) => {
+      const body = JSON.parse(String(options.body))
+      const payload = body.action === 'new'
+        ? { ok: true, tabId: 'agent-budget-cleanup' }
+        : body.action === 'tabs'
+          ? { ok: true, tabs: [{ id: 'agent-budget-cleanup', url: 'https://example.com/' }] }
+          : { ok: true, tabId: body.tabId }
+      return new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json' } })
+    })
+    vi.stubGlobal('fetch', fetchImpl)
+    const tool = createBrowserTools('http://127.0.0.1:12345/v1/restart-harness', 'secret')[0]
+    await expect(tool.execute({
+      code: `const tab = await browser.tabs.new();
+try {
+  for (let index = 0; index < 80; index += 1) await browser.tabs.list();
+} finally {
+  await tab.close();
+  await browser.tabs.finalize({ keep: [] });
+}`,
+    }, { agent: { id: 'session-a' } })).rejects.toThrow('exceeded 80 ordinary actions')
+    const actions = fetchImpl.mock.calls.map((call) => JSON.parse(String(call[1]?.body)).action)
+    expect(actions.slice(-2)).toEqual(['close', 'finalize'])
+  })
+
+  it('reports history no-op and timeout distinctly while finally closes the temporary tab', async () => {
+    const fetchImpl = vi.fn(async (_url: URL, options: RequestInit) => {
+      const body = JSON.parse(String(options.body))
+      const payload = body.action === 'new'
+        ? { ok: true, tabId: 'agent-history' }
+        : body.action === 'back'
+          ? { ok: true, status: 'no-op', reason: 'no-history-entry', tabId: body.tabId, attempts: 0 }
+          : body.action === 'forward'
+            ? { ok: false, status: 'timeout', reason: 'unstable-page', tabId: body.tabId, attempts: 2 }
+            : { ok: true, tabId: body.tabId }
+      return new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json' } })
+    })
+    vi.stubGlobal('fetch', fetchImpl)
+    const tool = createBrowserTools('http://127.0.0.1:12345/v1/restart-harness', 'secret')[0]
+    await expect(tool.execute({
+      code: `const tab = await browser.tabs.new();
+try {
+  const back = await tab.back();
+  if (back.status !== 'no-op') throw new Error('expected no-op');
+  await tab.forward();
+} finally {
+  await tab.close();
+}`,
+    }, { agent: { id: 'session-a' } })).rejects.toThrow('Browser navigation timeout: unstable-page')
+    const actions = fetchImpl.mock.calls.map((call) => JSON.parse(String(call[1]?.body)).action)
+    expect(actions).toEqual(['new', 'back', 'forward', 'close'])
   })
 })

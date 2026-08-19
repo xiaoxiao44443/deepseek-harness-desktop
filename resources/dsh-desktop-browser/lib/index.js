@@ -9,7 +9,8 @@ const CLEAR_DATA_PATH = '/api/dsh-desktop/browser/clear-data'
 const AGENT_STATUS_PATH = '/v1/browser/agent-status'
 const MAX_PROXY_BODY_BYTES = 65_536
 const MAX_BROWSER_SCRIPT_CHARS = 16_000
-const MAX_BROWSER_SCRIPT_ACTIONS = 40
+const MAX_BROWSER_SCRIPT_ACTIONS = 80
+const MAX_BROWSER_SCRIPT_CLEANUP_ACTIONS = 16
 const BROWSER_SCRIPT_TIMEOUT_MS = 90_000
 const BROWSER_SCRIPT_SYNC_TIMEOUT_MS = 1_000
 
@@ -45,6 +46,9 @@ Reuse this browser binding across later turns. A new turn or tab error does not 
 The model-facing surface is one tool: browser_execute. Pass JavaScript in its code argument. The script runs with only the documented browser object; use await for every browser call and return the final value that should be shown in the tool result. One script may perform several related browser actions in sequence.
 
 Tab management follows the Codex Browser object model:
+- browser.browserId identifies this isolated browser; await browser.nameSession(name) labels the automation session.
+- await browser.user.openTabs() lists unclaimed user tabs, claimTab(tabInfo) takes over an unchanged listed tab, and history({ queries?, from?, to?, limit? }) reads focused browser history.
+- browser.capabilities exposes visibility and viewport capabilities through list()/get(). visibility has get()/set(); viewport has set()/reset().
 - await browser.tabs.list() returns metadata for tabs owned by this DSH session.
 - The entries returned by list() are metadata, not Tab objects. Resolve one with await browser.tabs.get(entry.id) before calling tab methods.
 - await browser.tabs.new() claims the unused blank new tab when one exists, otherwise creates a background tab, and returns a Tab.
@@ -54,8 +58,12 @@ Tab management follows the Codex Browser object model:
 
 Tab API:
 - tab.id is the stable tab identifier.
-- await tab.goto(url), tab.back(), tab.forward(), tab.reload(), and tab.close() manage navigation and lifetime.
+- await tab.goto(url), tab.back(), tab.forward(), tab.reload(), and tab.close() manage navigation and lifetime. Navigation methods verify URL/history movement and the requested document lifecycle state; they do not guess when application-specific SPA content is ready. Successful and unavailable history moves return status "success" and "no-op" respectively; a started navigation that cannot reach its generic navigation postcondition throws a timeout error after one retry.
 - await tab.title() and tab.url() read current metadata.
+- await tab.markDeliverable() or tab.markHandoff() marks the tab for tabs.finalize() retention.
+- tab.clipboard implements read(), readText(), write(items), and writeText(text) for text, HTML, and PNG clipboard payloads.
+- tab.content exports the current page, Google Workspace files, or a YouTube transcript with export(), exportGsuite(type), and exportYouTubeTranscript().
+- tab.capabilities.get("pageAssets") returns list() and bundle() for observed page assets.
 - tab.playwright is the preferred semantic page API.
 - tab.cua is the coordinate fallback for canvas, maps, and other surfaces without useful DOM semantics. Prefer Playwright locators first.
 - tab.dom_cua exposes snapshot node IDs as a compact semantic fallback when a stable Locator is unavailable.
@@ -63,14 +71,14 @@ Tab API:
 
 Playwright API:
 - await tab.playwright.domSnapshot() returns a textual DOM snapshot. Reuse the latest relevant snapshot until navigation or a significant DOM change.
-- tab.playwright.locator(css), getByRole(role, { name?, exact? }), getByText(text, { exact? }), getByLabel(text, { exact? }), getByPlaceholder(text, { exact? }), and getByTestId(id) return a Locator.
+- tab.playwright.locator(css), getByRole(role, { name?: string|RegExp, exact? }), getByText(text, { exact? }), getByLabel(text, { exact? }), getByPlaceholder(text, { exact? }), and getByTestId(id) return a Locator.
 - tab.playwright.frameLocator(css) enters one matching iframe and returns a frame-scoped locator builder. It works for same-origin and cross-origin frames owned by the page.
 - Locator methods may be chained to scope descendants with locator(), getByRole(), getByText(), getByLabel(), getByPlaceholder(), and getByTestId().
-- filter({ hasText?, hasNotText? }), and(other), and or(other) narrow or combine locators from the same tab.
+- filter({ hasText?, hasNotText?, has?, hasNot?, visible? }), locator(css, filterOptions), and(other), and or(other) narrow or combine locators from the same tab. Text matchers accept strings or RegExp.
 - Locator nth(index), first(), and last() select one match. Use them only after count() confirms the intended position; prefer a unique semantic locator when possible.
-- await locator.count(), all(), allTextContents(), innerText(), textContent(), getAttribute(name), isVisible(), isEnabled(), and evaluate(readOnlyFunction, arg?) inspect matches.
-- await locator.click(), dblclick(), fill(value), type(value), press(key), focus(), check(), uncheck(), setChecked(value), selectOption(value), and waitFor({ state?, timeoutMs? }) interact or wait. selectOption currently accepts a string or string array.
-- await tab.playwright.waitForLoadState({ state?: "load"|"domcontentloaded"|"networkidle", timeoutMs? }), waitForURL(url, { timeoutMs?, waitUntil? }), and waitForTimeout(timeoutMs) wait for page state.
+- await locator.count(), all(), allTextContents(), innerText(), textContent(), getAttribute(name), isVisible(), isEnabled(), evaluate(readOnlyFunction, arg?), and evaluateAll(readOnlyFunction, arg?) inspect matches.
+- await locator.click(), dblclick(), fill(value), type(value), press(key), pressSequentially(text), focus(), check(), uncheck(), setChecked(value), selectOption(value), downloadMedia(), and waitFor({ state?, timeoutMs? }) interact or wait. click(), dblclick(), and press() guarantee actionability and action completion only; wrap navigation-triggering actions in expectNavigation(), then wait for a target Locator when SPA business content renders asynchronously. selectOption accepts strings and { value?, label?, index? } descriptors.
+- await tab.playwright.waitForLoadState({ state?: "load"|"domcontentloaded"|"networkidle", timeoutMs? }), waitForURL(url, { timeoutMs?, waitUntil? }), and waitForTimeout(timeoutMs) wait for page state. networkidle requires zero tracked HTTP requests for at least 500ms.
 - await tab.playwright.expectNavigation(action, { url?, timeoutMs?, waitUntil? }) synchronizes an action with the navigation it triggers and returns the action result.
 - await tab.playwright.evaluate(pageFunction, arg?, { timeoutMs? }) performs bounded read-only page inspection. Use locators for interaction.
 - tab.playwright.elementInfo({ x, y, includeNonInteractable? }) maps screenshot coordinates back to locator-oriented DOM metadata; elementScreenshot(...) saves an annotated viewport image.
@@ -79,7 +87,7 @@ Playwright API:
 - await tab.getJsDialog() returns the active alert/confirm/prompt/beforeunload object when present; use its accept()/dismiss() method before continuing.
 
 Coordinate fallback API:
-- await tab.cua.click({ x, y }), double_click({ x, y }), move({ x, y }), drag({ path }), keypress({ keys }), type({ text }), and scroll({ x, y, scrollX, scrollY }) mirror the compact Codex CUA shape.
+- await tab.cua.click({ x, y, button?, keypress? }), double_click({ x, y, keypress? }), move({ x, y, keys? }), drag({ path, keys? }), keypress({ keys }), type({ text }), and scroll({ x, y, scrollX, scrollY, keypress? }) mirror the compact Codex CUA shape. Drag preserves intermediate path points.
 - Take tab.screenshot() immediately before coordinate work and do not reuse coordinates after navigation, scrolling, resizing, or a significant visual change.
 - await tab.dom_cua.get_visible_dom() returns the current snapshot text and binds its node IDs. Then use click({ node_id }), double_click({ node_id }), scroll({ node_id?, x, y }), keypress({ keys }), or type({ text }). Refresh it after significant page changes.
 
@@ -87,20 +95,26 @@ Workflow:
 1. Reuse a suitable tab from browser.tabs.list(), or create one with browser.tabs.new(). Keep the returned Tab binding through the task.
 2. Call tab.playwright.domSnapshot() before constructing a locator. Build locators only from roles, names, text, labels, test ids, or stable attributes present in that snapshot.
 3. Before click, fill, press, or selectOption, call count() unless uniqueness is already certain. Proceed only when the locator resolves to exactly one element.
-4. After navigation or a significant interaction, take a fresh snapshot only when the next decision needs new locator ground truth.
+4. After navigation or a significant interaction, verify the cheapest explicit postcondition: waitForURL() for a route, locator.waitFor() for business UI, or a fresh snapshot when the next decision needs new locator ground truth. Do not use title, H1, or arbitrary fixed sleeps as a generic SPA-ready signal.
 5. Repeated snapshots keep stable element refs within the same document and report incremental changes for orientation.
-6. Keep one script focused. Return the final snapshot or useful operation result. The runtime limits script duration and action count.
+6. Keep one script focused. Return the final snapshot or useful operation result. The runtime allows up to 80 ordinary browser actions per script; close() and tabs.finalize() use a separate reserved cleanup allowance so finally blocks can still run after the ordinary budget is exhausted. Prefer one read-only evaluate() when several related page-state values can be collected together.
 7. Use tab.show(true) only when the user asks to see the page or visible inspection materially helps. Never claim a hidden background page is visible to the user.
 8. Do not bypass authentication, permission prompts, CAPTCHAs, or site safety controls. Ask the user to take over when human interaction is required.
+9. Put temporary tabs in try/finally and close them in finally. If a verified state-changing action reports no change, retry the identical action at most once.
 
 Example:
 const tab = await browser.tabs.new();
-await tab.goto("https://example.com/");
-const page = await tab.playwright.domSnapshot();
-const link = tab.playwright.getByRole("link", { name: "Learn more" });
-if (await link.count() !== 1) throw new Error("Expected one link");
-await link.click();
-return await tab.playwright.domSnapshot();
+try {
+  await tab.goto("https://example.com/");
+  const page = await tab.playwright.domSnapshot();
+  const link = tab.playwright.getByRole("link", { name: "Learn more" });
+  if (await link.count() !== 1) throw new Error("Expected one link");
+  await tab.playwright.expectNavigation(() => link.click(), { url: "https://example.com/docs*", waitUntil: "domcontentloaded" });
+  await tab.playwright.getByRole("heading", { name: "Documentation" }).waitFor({ state: "visible" });
+  return await tab.playwright.domSnapshot();
+} finally {
+  await tab.close();
+}
 
 The desktop browser has an isolated persistent browsing profile. Downloads explicitly initiated through waitForEvent("download") are saved into the desktop-managed downloads directory; website permission requests remain disabled. tab.screenshot() returns a local PNG path when pixel inspection is necessary.`
 
@@ -135,7 +149,10 @@ const BROWSER_ACTIONS = new Set([
   'viewport', 'visibility', 'back', 'forward', 'reload', 'close', 'navigation-state',
   'wait-navigation', 'wait-url', 'wait-timeout', 'hover', 'click', 'drag', 'press', 'type', 'evaluate', 'logs',
   'wait-event', 'filechooser-set-files', 'download-path', 'get-dialog', 'handle-dialog',
-  'element-info', 'element-screenshot',
+  'element-info', 'element-screenshot', 'user-tabs', 'claim-tab', 'browser-history', 'name-session',
+  'browser-visibility', 'browser-viewport', 'mark-tab', 'clipboard-read', 'clipboard-read-text',
+  'clipboard-write', 'clipboard-write-text', 'content-export', 'content-export-gsuite',
+  'content-export-youtube', 'page-assets-list', 'page-assets-bundle',
 ])
 
 function browserActionTimeout(action) {
@@ -144,15 +161,18 @@ function browserActionTimeout(action) {
   if (action === 'wait-navigation' || action === 'wait-url') return 65_000
   if (action === 'wait-event') return 65_000
   if (action === 'download-path') return 125_000
+  if (action === 'content-export' || action === 'content-export-gsuite' || action === 'content-export-youtube') return 125_000
+  if (action === 'page-assets-bundle') return 125_000
   if (action === 'wait-timeout') return 35_000
   return 30_000
 }
 
 function browserTraceEntry(action, result) {
   const entry = { action }
-  for (const key of ['ok', 'tabId', 'url', 'title', 'snapshotVersion', 'visible', 'path', 'operation', 'count']) {
+  for (const key of ['ok', 'status', 'reason', 'attempts', 'tabId', 'url', 'title', 'snapshotVersion', 'visible', 'path', 'operation', 'count']) {
     if (result[key] !== undefined) entry[key] = result[key]
   }
+  if (result.navigation?.status !== undefined) entry.navigationStatus = result.navigation.status
   if (Array.isArray(result.tabs)) entry.tabCount = result.tabs.length
   return entry
 }
@@ -163,6 +183,10 @@ function browserBootstrapSource() {
     const rpc = globalThis.__browserRpc;
     delete globalThis.__browserRpc;
     const call = async (action, args = {}) => JSON.parse(await rpc(JSON.stringify({ action, args })));
+    const navigationResult = (result) => {
+      if (result?.status === "timeout") throw new Error("Browser navigation timeout: " + String(result.reason || "navigation postcondition not reached"));
+      return result;
+    };
     const object = (value) => value && typeof value === "object" && !Array.isArray(value) ? value : {};
     const tabId = (value) => typeof value === "string" ? value : value && typeof value.id === "string" ? value.id : undefined;
     const metadata = async (id) => {
@@ -175,13 +199,28 @@ function browserBootstrapSource() {
       if (typeof value !== "string" || value.length === 0) throw new Error(name + " requires a non-empty string");
       return value;
     };
-    const semanticStep = (kind, value, options = {}) => ({ kind, value: string(value, kind), exact: object(options).exact === true });
-    const roleStep = (role, options = {}) => ({
-      kind: "role",
-      value: string(role, "getByRole"),
-      ...(object(options).name === undefined ? {} : { name: string(object(options).name, "getByRole name") }),
-      exact: object(options).exact === true,
-    });
+    const matcher = (value, name) => typeof value === "string"
+      ? { value: string(value, name) }
+      : Object.prototype.toString.call(value) === "[object RegExp]" && value.source.length > 0
+        ? { value: value.source, namePattern: value.source, nameFlags: value.flags }
+        : (() => { throw new Error(name + " requires a non-empty string or RegExp"); })();
+    const semanticStep = (kind, value, options = {}) => ({ kind, ...matcher(value, kind), exact: object(options).exact === true });
+    const roleStep = (role, options = {}) => {
+      const name = object(options).name;
+      const serializedName = name === undefined
+        ? {}
+        : typeof name === "string"
+          ? { name: string(name, "getByRole name") }
+          : Object.prototype.toString.call(name) === "[object RegExp]"
+            ? { namePattern: name.source, nameFlags: name.flags }
+            : (() => { throw new Error("getByRole name requires a non-empty string or RegExp"); })();
+      return {
+        kind: "role",
+        value: string(role, "getByRole"),
+        ...serializedName,
+        exact: object(options).exact === true,
+      };
+    };
     const locatorPlans = new WeakMap();
     const createLocator = (id, plan) => {
       const invoke = (operation, args = {}) => call("locator", { ...object(args), tabId: id, locator: plan, operation });
@@ -191,8 +230,30 @@ function browserBootstrapSource() {
         if (!metadata || metadata.id !== id) throw new Error(kind + " requires a Locator from the same tab");
         return extend({ kind, value: JSON.stringify(metadata.plan) });
       };
+      const serializeFilter = (options = {}) => {
+        const value = object(options);
+        const output = {};
+        if (value.hasText !== undefined) output.hasText = matcher(value.hasText, "filter hasText");
+        if (value.hasNotText !== undefined) output.hasNotText = matcher(value.hasNotText, "filter hasNotText");
+        for (const key of ["has", "hasNot"]) {
+          if (value[key] === undefined) continue;
+          const metadata = locatorPlans.get(value[key]);
+          if (!metadata || metadata.id !== id) throw new Error("filter " + key + " requires a Locator from the same tab");
+          output[key] = metadata.plan;
+        }
+        if (value.visible !== undefined) {
+          if (typeof value.visible !== "boolean") throw new Error("filter visible must be a boolean");
+          output.visible = value.visible;
+        }
+        if (Object.keys(output).length === 0) throw new Error("filter requires hasText, hasNotText, has, hasNot, or visible");
+        return { kind: "filter", value: JSON.stringify(output) };
+      };
+      const descendant = (selector, options = {}) => {
+        const next = extend({ kind: "css", value: string(selector, "locator") });
+        return Object.keys(object(options)).length === 0 ? next : next.filter(options);
+      };
       const locator = {
-        locator: (selector) => extend({ kind: "css", value: string(selector, "locator") }),
+        locator: descendant,
         frameLocator: (selector) => {
           if (plan.some((step) => step.kind !== "frame")) throw new Error("frameLocator must precede element locator steps");
           return extend({ kind: "frame", value: string(selector, "frameLocator") });
@@ -202,13 +263,7 @@ function browserBootstrapSource() {
         getByLabel: (text, options = {}) => extend(semanticStep("label", text, options)),
         getByPlaceholder: (text, options = {}) => extend(semanticStep("placeholder", text, options)),
         getByTestId: (testId) => extend({ kind: "testid", value: string(testId, "getByTestId") }),
-        filter: (options = {}) => {
-          const value = object(options);
-          if (value.hasText === undefined && value.hasNotText === undefined) throw new Error("filter requires hasText or hasNotText");
-          if (value.hasText !== undefined && typeof value.hasText !== "string") throw new Error("filter hasText must be a string");
-          if (value.hasNotText !== undefined && typeof value.hasNotText !== "string") throw new Error("filter hasNotText must be a string");
-          return extend({ kind: "filter", value: JSON.stringify({ ...(value.hasText === undefined ? {} : { hasText: value.hasText }), ...(value.hasNotText === undefined ? {} : { hasNotText: value.hasNotText }) }) });
-        },
+        filter: (options = {}) => extend(serializeFilter(options)),
         and: (other) => combine("and", other),
         or: (other) => combine("or", other),
         nth: (index) => {
@@ -239,14 +294,22 @@ function browserBootstrapSource() {
           const script = typeof pageFunction === "function" ? String(pageFunction) : string(pageFunction, "evaluate");
           return (await invoke("evaluate", { ...object(options), script, argument })).value;
         },
+        evaluateAll: async (pageFunction, argument, options = {}) => {
+          const script = typeof pageFunction === "function" ? String(pageFunction) : string(pageFunction, "evaluateAll");
+          return (await invoke("evaluate-all", { ...object(options), script, argument })).value;
+        },
+        downloadMedia: async (options = {}) => { await invoke("download-media", object(options)); },
+        pressSequentially: async (value, options = {}) => { await invoke("press-sequentially", { ...object(options), value: String(value) }); },
         selectOption: async (value, options = {}) => {
           const values = Array.isArray(value) ? value : [value];
-          if (values.length === 0 || values.some((entry) => typeof entry !== "string")) throw new Error("selectOption requires a string or string array");
+          if (values.length === 0 || values.some((entry) => typeof entry !== "string" && (!entry || typeof entry !== "object" || Array.isArray(entry)))) {
+            throw new Error("selectOption requires a string, option descriptor, or array of those values");
+          }
           await invoke("select-option", { ...object(options), values });
         },
-        innerText: async () => (await invoke("inner-text")).value,
-        textContent: async () => (await invoke("text-content")).value,
-        getAttribute: async (name) => (await invoke("get-attribute", { attribute: string(name, "getAttribute") })).value,
+        innerText: async (options = {}) => (await invoke("inner-text", object(options))).value,
+        textContent: async (options = {}) => (await invoke("text-content", object(options))).value,
+        getAttribute: async (name, options = {}) => (await invoke("get-attribute", { ...object(options), attribute: string(name, "getAttribute") })).value,
         isVisible: async () => (await invoke("is-visible")).value,
         isEnabled: async () => (await invoke("is-enabled")).value,
         waitFor: async (options = {}) => { await invoke("wait-for", object(options)); },
@@ -258,7 +321,10 @@ function browserBootstrapSource() {
     const createPlaywright = (id) => {
       const playwright = {
         domSnapshot: async () => (await call("snapshot", { tabId: id })).snapshot,
-        locator: (selector) => createLocator(id, [{ kind: "css", value: string(selector, "locator") }]),
+        locator: (selector, options = {}) => {
+          const value = createLocator(id, [{ kind: "css", value: string(selector, "locator") }]);
+          return Object.keys(object(options)).length === 0 ? value : value.filter(options);
+        },
         frameLocator: (selector) => createLocator(id, [{ kind: "frame", value: string(selector, "frameLocator") }]),
         getByRole: (role, options = {}) => createLocator(id, [roleStep(role, options)]),
         getByText: (text, options = {}) => createLocator(id, [semanticStep("text", text, options)]),
@@ -276,7 +342,7 @@ function browserBootstrapSource() {
           if (typeof action !== "function") throw new Error("expectNavigation requires an async action function");
           const state = await call("navigation-state", { tabId: id });
           const result = await action();
-          await call("wait-navigation", { ...object(options), tabId: id, afterVersion: state.version });
+          await call("wait-navigation", { ...object(options), tabId: id, afterVersion: state.version, before: state.before });
           return result;
         },
         evaluate: async (pageFunction, argument, options = {}) => {
@@ -318,13 +384,15 @@ function browserBootstrapSource() {
       const cua = {
         click: async (options) => { await call("click", withTab(point(options, "click"))); },
         double_click: async (options) => { await call("click", { ...withTab(point(options, "double_click")), clickCount: 2 }); },
-        move: async (options) => { await call("hover", withTab(point(options, "move"))); },
+        move: async (options) => {
+          const value = point(options, "move");
+          await call("hover", { ...withTab(value), keypress: value.keys });
+        },
         drag: async (options) => {
           const path = object(options).path;
           if (!Array.isArray(path) || path.length < 2) throw new Error("drag requires a path containing at least two points");
-          const first = point(path[0], "drag path point");
-          const last = point(path[path.length - 1], "drag path point");
-          await call("drag", { tabId: id, startX: first.x, startY: first.y, endX: last.x, endY: last.y });
+          path.forEach((entry) => point(entry, "drag path point"));
+          await call("drag", { tabId: id, path, keypress: object(options).keys });
         },
         keypress: async (options) => {
           const keys = object(options).keys;
@@ -335,7 +403,7 @@ function browserBootstrapSource() {
         scroll: async (options) => {
           const value = point(options, "scroll");
           if (!Number.isFinite(value.scrollX) || !Number.isFinite(value.scrollY)) throw new Error("scroll requires finite scrollX and scrollY values");
-          await call("scroll", { tabId: id, x: value.x, y: value.y, deltaX: value.scrollX, deltaY: value.scrollY });
+          await call("scroll", { tabId: id, x: value.x, y: value.y, deltaX: value.scrollX, deltaY: value.scrollY, keypress: value.keypress });
         },
       };
       for (const method of Object.values(cua)) Object.freeze(method);
@@ -372,15 +440,45 @@ function browserBootstrapSource() {
       for (const method of Object.values(dom)) Object.freeze(method);
       return Object.freeze(dom);
     };
+    const publicResult = (result) => {
+      const { ok: _ok, tabId: _tabId, ...value } = result || {};
+      return value;
+    };
+    const createTabCapabilities = (id) => {
+      const pageAssets = Object.freeze({
+        documentation: async () => "pageAssets.list() inventories observed assets; bundle({ inventoryId, assetIds?, kinds? }) exports selected assets.",
+        list: async () => publicResult(await call("page-assets-list", { tabId: id })),
+        bundle: async (options = {}) => publicResult(await call("page-assets-bundle", { ...object(options), tabId: id })),
+      });
+      return Object.freeze({
+        list: async () => [{ id: "pageAssets", description: "List and bundle assets observed in the current page state." }],
+        get: async (capabilityId) => {
+          if (capabilityId !== "pageAssets") throw new Error("Unknown tab capability: " + String(capabilityId));
+          return pageAssets;
+        },
+      });
+    };
     const createTab = (id) => {
       if (typeof id !== "string" || id.length === 0) throw new Error("A valid tab id is required");
       const withTab = (options = {}) => ({ ...object(options), tabId: id });
       const tab = {
         id,
-        back: async () => { await call("back", { tabId: id }); },
+        capabilities: createTabCapabilities(id),
+        clipboard: Object.freeze({
+          read: async () => (await call("clipboard-read", { tabId: id })).items,
+          readText: async () => (await call("clipboard-read-text", { tabId: id })).text,
+          write: async (items) => { await call("clipboard-write", { tabId: id, items }); },
+          writeText: async (text) => { await call("clipboard-write-text", { tabId: id, text: String(text) }); },
+        }),
+        content: Object.freeze({
+          export: async () => (await call("content-export", { tabId: id })).path,
+          exportGsuite: async (exportType) => (await call("content-export-gsuite", { tabId: id, exportType: String(exportType) })).path,
+          exportYouTubeTranscript: async () => (await call("content-export-youtube", { tabId: id })).path,
+        }),
+        back: async () => navigationResult(await call("back", { tabId: id })),
         close: async () => { await call("close", { tabId: id }); },
-        forward: async () => { await call("forward", { tabId: id }); },
-        goto: async (url) => { await call("navigate", { tabId: id, url }); },
+        forward: async () => navigationResult(await call("forward", { tabId: id })),
+        goto: async (url) => navigationResult(await call("navigate", { tabId: id, url })),
         getJsDialog: async () => {
           const result = await call("get-dialog", { tabId: id });
           if (!result.dialog) return undefined;
@@ -394,7 +492,9 @@ function browserBootstrapSource() {
           for (const method of Object.values(dialog)) if (typeof method === "function") Object.freeze(method);
           return Object.freeze(dialog);
         },
-        reload: async () => { await call("reload", { tabId: id }); },
+        markDeliverable: async () => { await call("mark-tab", { tabId: id, status: "completed" }); },
+        markHandoff: async () => { await call("mark-tab", { tabId: id, status: "handoff" }); },
+        reload: async () => navigationResult(await call("reload", { tabId: id })),
         screenshot: (options = {}) => call("screenshot", withTab(options)),
         title: async () => (await metadata(id)).title,
         url: async () => (await metadata(id)).url,
@@ -435,9 +535,39 @@ function browserBootstrapSource() {
     };
     for (const method of Object.values(tabs)) Object.freeze(method);
     Object.freeze(tabs);
+    const visibilityCapability = Object.freeze({
+      documentation: async () => "visibility.get() reads browser presentation state; visibility.set(boolean) shows or hides it.",
+      get: async () => (await call("browser-visibility")).visible === true,
+      set: async (visible) => { if (typeof visible !== "boolean") throw new Error("visibility.set requires a boolean"); await call("browser-visibility", { visible }); },
+    });
+    const viewportCapability = Object.freeze({
+      documentation: async () => "viewport.set({ width, height }) applies an explicit override; viewport.reset() clears it.",
+      set: async (options) => { await call("browser-viewport", object(options)); },
+      reset: async () => { await call("browser-viewport"); },
+    });
+    const capabilities = Object.freeze({
+      list: async () => [
+        { id: "visibility", description: "Show, hide, or inspect browser visibility." },
+        { id: "viewport", description: "Set or reset an explicit viewport override." },
+      ],
+      get: async (capabilityId) => {
+        if (capabilityId === "visibility") return visibilityCapability;
+        if (capabilityId === "viewport") return viewportCapability;
+        throw new Error("Unknown browser capability: " + String(capabilityId));
+      },
+    });
+    const user = Object.freeze({
+      openTabs: async () => (await call("user-tabs")).tabs,
+      claimTab: async (tab) => createTab((await call("claim-tab", { userTab: typeof tab === "string" ? { id: tab } : object(tab) })).tabId),
+      history: async (options = {}) => (await call("browser-history", object(options))).entries,
+    });
     const browser = Object.freeze({
+      browserId: "dsh-isolated-browser",
+      capabilities,
       documentation: async () => documentation,
+      nameSession: async (name) => { await call("name-session", { name: string(name, "nameSession") }); },
       tabs,
+      user,
     });
     Object.defineProperty(globalThis, "browser", { value: browser, writable: false, configurable: false });
   })()`
@@ -450,14 +580,11 @@ async function executeBrowserScript(code, sessionId, controlUrl, controlToken) {
   const startedAt = Date.now()
   const trace = []
   let actionCount = 0
+  let cleanupActionCount = 0
   let lastResult
   let active = true
   const rpc = async (serialized) => {
     if (!active) throw new Error('Browser script is no longer active')
-    if (actionCount >= MAX_BROWSER_SCRIPT_ACTIONS) {
-      throw new Error(`Browser script exceeded ${String(MAX_BROWSER_SCRIPT_ACTIONS)} actions`)
-    }
-    actionCount += 1
     if (typeof serialized !== 'string' || serialized.length > 32_768) throw new Error('Invalid browser API call')
     const request = JSON.parse(serialized)
     const action = typeof request?.action === 'string' ? request.action : ''
@@ -465,6 +592,18 @@ async function executeBrowserScript(code, sessionId, controlUrl, controlToken) {
     const args = request?.args !== null && typeof request?.args === 'object' && !Array.isArray(request.args)
       ? request.args
       : {}
+    const cleanupAction = action === 'close' || action === 'finalize'
+    if (cleanupAction) {
+      if (cleanupActionCount >= MAX_BROWSER_SCRIPT_CLEANUP_ACTIONS) {
+        throw new Error(`Browser script exceeded ${String(MAX_BROWSER_SCRIPT_CLEANUP_ACTIONS)} reserved cleanup actions`)
+      }
+      cleanupActionCount += 1
+    } else {
+      if (actionCount >= MAX_BROWSER_SCRIPT_ACTIONS) {
+        throw new Error(`Browser script exceeded ${String(MAX_BROWSER_SCRIPT_ACTIONS)} ordinary actions; close/finalize cleanup remains available`)
+      }
+      actionCount += 1
+    }
     const remainingMs = BROWSER_SCRIPT_TIMEOUT_MS - (Date.now() - startedAt)
     if (remainingMs <= 0) throw new Error('Browser script timed out')
     const result = await desktopRequest(controlUrl, controlToken, '/v1/browser/action', {

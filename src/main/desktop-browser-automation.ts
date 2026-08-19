@@ -17,6 +17,71 @@ export type BrowserDebuggerCommand = (
 
 export type BrowserSnapshotReader = (tab: BrowserTabRuntime) => Promise<Record<string, unknown>>
 
+export interface BrowserNavigationState {
+  version: number
+  url: string
+  title: string
+  h1: string
+  text: string
+  readyState: string
+  loading: boolean
+  inflightRequests: number
+  networkActivityVersion?: number
+  networkIdleMs: number
+  kind: 'document' | 'same-document'
+}
+
+export interface BrowserNavigationOutcome {
+  status: 'success' | 'no-op' | 'timeout'
+  reason?: 'no-navigation' | 'expected-url' | 'unstable-page'
+  state: BrowserNavigationState
+  elapsedMs: number
+}
+
+export interface BrowserNavigationWaitOptions {
+  timeoutMs: number
+  waitUntil: 'commit' | 'domcontentloaded' | 'load' | 'networkidle'
+  expectedUrl?: string
+  requireNavigation: boolean
+  acceptCurrent?: boolean
+  detectionTimeoutMs?: number
+}
+
+export interface BrowserNavigationRetryResult {
+  attempts: number
+  outcome?: BrowserNavigationOutcome
+  error?: unknown
+}
+
+export interface BrowserReadOnlyEvaluation {
+  source: string
+  argument: string
+  timeoutMs: number
+}
+
+const READ_ONLY_EVALUATION_FORBIDDEN = /(?:\b(?:fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon)\b|\b(?:localStorage|sessionStorage|indexedDB|caches)\b|\b(?:(?:(?:window|globalThis|document)\s*\.\s*)?location)\s*(?:=|\.\s*(?:assign|replace|reload)\s*\(|\.\s*(?:href|protocol|host|hostname|port|pathname|search|hash)\s*=)|\bhistory\s*\.\s*(?:back|forward|go|pushState|replaceState)\s*\(|\bhistory\s*\.\s*scrollRestoration\s*=|\.\s*(?:click|focus|blur|submit|remove|append|appendChild|prepend|replaceWith|setAttribute|removeAttribute|dispatchEvent)\s*\(|\.(?:innerHTML|outerHTML|textContent|value|checked)\s*=)/u
+
+export function prepareReadOnlyEvaluation(request: DesktopBrowserAgentRequest): BrowserReadOnlyEvaluation {
+  if (typeof request.script !== 'string' || request.script.trim().length === 0 || request.script.length > 8_000) {
+    throw new Error('evaluate script 必须是 1–8000 字符的字符串。')
+  }
+  if (READ_ONLY_EVALUATION_FORBIDDEN.test(request.script)) {
+    throw new Error('evaluate 只允许只读页面检查，脚本包含可能修改页面或发起网络请求的操作。')
+  }
+  let argument: string
+  try {
+    argument = JSON.stringify(request.argument ?? null)
+  } catch {
+    throw new Error('evaluate argument 必须可 JSON 序列化。')
+  }
+  if (argument.length > 32_000) throw new Error('evaluate argument 过大。')
+  return {
+    source: request.script.trim(),
+    argument,
+    timeoutMs: request.timeoutMs === undefined ? 5_000 : positiveInteger(request.timeoutMs, 'timeoutMs', 250, 15_000),
+  }
+}
+
 const LOCATOR_KINDS = new Set<BrowserLocatorKind>([
   'css', 'role', 'text', 'label', 'placeholder', 'testid', 'nth', 'frame', 'filter', 'and', 'or',
 ])
@@ -36,8 +101,21 @@ export function parseLocatorPlan(request: DesktopBrowserAgentRequest): BrowserLo
         if (source.kind === 'filter') {
           if (decoded === null || typeof decoded !== 'object' || Array.isArray(decoded)) throw new Error()
           const options = decoded as Record<string, unknown>
-          if (options.hasText !== undefined && typeof options.hasText !== 'string') throw new Error()
-          if (options.hasNotText !== undefined && typeof options.hasNotText !== 'string') throw new Error()
+          const validMatcher = (matcher: unknown): boolean => {
+            if (matcher === null || typeof matcher !== 'object' || Array.isArray(matcher)) return false
+            const value = matcher as Record<string, unknown>
+            if (typeof value.value !== 'string' || value.value.length === 0) return false
+            if (value.namePattern !== undefined && typeof value.namePattern !== 'string') return false
+            if (value.nameFlags !== undefined && typeof value.nameFlags !== 'string') return false
+            return true
+          }
+          if (options.hasText !== undefined && !validMatcher(options.hasText)) throw new Error()
+          if (options.hasNotText !== undefined && !validMatcher(options.hasNotText)) throw new Error()
+          if (options.has !== undefined && (!Array.isArray(options.has) || options.has.length === 0 || options.has.length > 12)) throw new Error()
+          if (options.hasNot !== undefined && (!Array.isArray(options.hasNot) || options.hasNot.length === 0 || options.hasNot.length > 12)) throw new Error()
+          if (options.visible !== undefined && typeof options.visible !== 'boolean') throw new Error()
+          if (options.hasText === undefined && options.hasNotText === undefined && options.has === undefined
+            && options.hasNot === undefined && options.visible === undefined) throw new Error()
         } else if (!Array.isArray(decoded) || decoded.length === 0 || decoded.length > 12) throw new Error()
       } catch {
         throw new Error(`locator ${String(source.kind)} 配置无效。`)
@@ -47,10 +125,26 @@ export function parseLocatorPlan(request: DesktopBrowserAgentRequest): BrowserLo
     if (source.name !== undefined && (typeof source.name !== 'string' || source.name.length === 0 || source.name.length > 500)) {
       throw new Error('locator name 无效。')
     }
+    if (source.namePattern !== undefined) {
+      if (typeof source.namePattern !== 'string' || source.namePattern.length === 0 || source.namePattern.length > 500) {
+        throw new Error('locator namePattern 无效。')
+      }
+      if (source.name !== undefined) throw new Error('locator name 和 namePattern 不能同时使用。')
+      if (source.nameFlags !== undefined && (typeof source.nameFlags !== 'string' || !/^[dgimsuvy]*$/u.test(source.nameFlags))) {
+        throw new Error('locator nameFlags 无效。')
+      }
+      try {
+        new RegExp(source.namePattern, typeof source.nameFlags === 'string' ? source.nameFlags : '')
+      } catch {
+        throw new Error('locator namePattern 不是有效正则表达式。')
+      }
+    } else if (source.nameFlags !== undefined) throw new Error('locator nameFlags 缺少 namePattern。')
     return {
       kind: source.kind as BrowserLocatorKind,
       value: source.value,
       ...(typeof source.name === 'string' ? { name: source.name } : {}),
+      ...(typeof source.namePattern === 'string' ? { namePattern: source.namePattern } : {}),
+      ...(typeof source.nameFlags === 'string' ? { nameFlags: source.nameFlags } : {}),
       ...(source.exact === true ? { exact: true } : {}),
     }
   })
@@ -130,6 +224,157 @@ export async function waitForPage(
   throw new Error(`等待${condition}超时（${String(timeoutMs)}ms）。`)
 }
 
+function urlPatternMatches(expected: string | undefined, actual: string): boolean {
+  if (expected === undefined) return true
+  const escaped = expected.replace(/[.+?^${}()|[\]\\]/gu, '\\$&').replaceAll('*', '.*')
+  return new RegExp(`^${escaped}$`, 'u').test(actual)
+}
+
+function navigationSignature(state: BrowserNavigationState): string {
+  return [
+    state.url,
+    state.readyState,
+    String(state.loading),
+    String(state.inflightRequests),
+    String(state.networkActivityVersion ?? 0),
+  ].join('\u0000')
+}
+
+function commitNavigationState(tab: BrowserTabRuntime, state: BrowserNavigationState): void {
+  tab.url = /^https?:\/\//iu.test(state.url) ? state.url : ''
+  tab.title = state.title || tab.view.webContents.getTitle().trim() || tab.url || '浏览器'
+}
+
+export async function readNavigationState(
+  tab: BrowserTabRuntime,
+  debuggerCommand: BrowserDebuggerCommand,
+): Promise<BrowserNavigationState> {
+  const contents = tab.view.webContents
+  if (contents.isDestroyed()) throw new Error('浏览器标签页已关闭。')
+  const currentUrl = contents.getURL()
+  const response = await debuggerCommand(tab, 'Runtime.evaluate', {
+    expression: `(() => {
+      const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+      return {
+        readyState: document.readyState,
+        title: document.title,
+        h1: normalize(document.querySelector('h1')?.innerText),
+        text: normalize(document.body?.innerText).slice(0, 4000),
+      };
+    })()`,
+    returnByValue: true,
+  }).catch(() => undefined) as { result?: { value?: { readyState?: unknown; title?: unknown; h1?: unknown; text?: unknown } } } | undefined
+  const value = response?.result?.value
+  return {
+    version: tab.navigationVersion,
+    url: currentUrl,
+    title: typeof value?.title === 'string' ? value.title.trim() : contents.getTitle().trim(),
+    h1: typeof value?.h1 === 'string' ? value.h1 : '',
+    text: typeof value?.text === 'string' ? value.text : '',
+    readyState: typeof value?.readyState === 'string' ? value.readyState : 'loading',
+    loading: tab.loading,
+    inflightRequests: tab.inflightRequests.size,
+    networkActivityVersion: tab.networkActivityVersion ?? 0,
+    networkIdleMs: tab.inflightRequests.size === 0 ? Math.max(0, Date.now() - tab.networkIdleSince) : 0,
+    kind: tab.lastNavigationKind,
+  }
+}
+
+export async function waitForNavigationStability(
+  tab: BrowserTabRuntime,
+  before: BrowserNavigationState,
+  options: BrowserNavigationWaitOptions,
+  debuggerCommand: BrowserDebuggerCommand,
+): Promise<BrowserNavigationOutcome> {
+  const startedAt = Date.now()
+  const deadline = startedAt + options.timeoutMs
+  const detectionDeadline = startedAt + (options.detectionTimeoutMs ?? 300)
+  let detectedAt: number | undefined
+  let stableSince: number | undefined
+  let stableSignature = ''
+  let networkQuietSince: number | undefined
+  let networkQuietVersion: number | undefined
+  let latest = before
+  let matchedExpectedUrl = false
+
+  while (Date.now() <= deadline) {
+    latest = await readNavigationState(tab, debuggerCommand)
+    const now = Date.now()
+    const changed = latest.version > before.version || latest.url !== before.url || latest.loading
+    if (detectedAt === undefined && (changed || options.acceptCurrent === true)) detectedAt = now
+    if (detectedAt === undefined) {
+      if (!options.requireNavigation && now >= detectionDeadline) {
+        return { status: 'no-op', reason: 'no-navigation', state: latest, elapsedMs: now - startedAt }
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 100))
+      continue
+    }
+
+    const urlReady = urlPatternMatches(options.expectedUrl, latest.url)
+    matchedExpectedUrl ||= urlReady
+    if (urlReady && options.waitUntil === 'commit') {
+      commitNavigationState(tab, latest)
+      return { status: 'success', state: latest, elapsedMs: now - startedAt }
+    }
+    if (latest.inflightRequests !== 0) {
+      networkQuietSince = undefined
+      networkQuietVersion = undefined
+    } else if (networkQuietSince === undefined || networkQuietVersion !== (latest.networkActivityVersion ?? 0)) {
+      networkQuietSince = now
+      networkQuietVersion = latest.networkActivityVersion ?? 0
+    }
+    const documentReady = options.waitUntil === 'domcontentloaded'
+      ? latest.readyState === 'interactive' || latest.readyState === 'complete'
+      : options.waitUntil === 'networkidle'
+        ? latest.readyState === 'complete'
+          && !latest.loading
+          && latest.inflightRequests === 0
+          && networkQuietSince !== undefined
+          && now - networkQuietSince >= 500
+        : latest.readyState === 'complete' && !latest.loading
+    const ready = urlReady && documentReady
+    const signature = navigationSignature(latest)
+    if (ready) {
+      if (signature !== stableSignature) {
+        stableSignature = signature
+        stableSince = now
+      } else if (stableSince !== undefined && now - stableSince >= 180) {
+        commitNavigationState(tab, latest)
+        return { status: 'success', state: latest, elapsedMs: now - startedAt }
+      }
+    } else {
+      stableSignature = ''
+      stableSince = undefined
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 100))
+  }
+
+  return {
+    status: 'timeout',
+    reason: matchedExpectedUrl ? 'unstable-page' : 'expected-url',
+    state: latest,
+    elapsedMs: Date.now() - startedAt,
+  }
+}
+
+export async function runNavigationWithRetry(
+  action: () => Promise<void>,
+  observe: () => Promise<BrowserNavigationOutcome>,
+): Promise<BrowserNavigationRetryResult> {
+  let outcome: BrowserNavigationOutcome | undefined
+  let error: unknown
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      await action()
+      outcome = await observe()
+      if (outcome.status === 'success') return { attempts: attempt, outcome }
+    } catch (currentError) {
+      error = currentError
+    }
+  }
+  return { attempts: 2, ...(outcome === undefined ? {} : { outcome }), ...(error === undefined ? {} : { error }) }
+}
+
 export async function waitForNavigation(
   tab: BrowserTabRuntime,
   request: DesktopBrowserAgentRequest,
@@ -146,31 +391,59 @@ export async function waitForNavigation(
   if (!['commit', 'domcontentloaded', 'load', 'networkidle'].includes(String(waitUntil))) {
     throw new Error('waitUntil 必须是 commit、domcontentloaded、load 或 networkidle。')
   }
-  const urlMatches = (actual: string): boolean => {
-    if (expectedUrl === undefined) return true
-    const escaped = expectedUrl.replace(/[.+?^${}()|[\]\\]/gu, '\\$&').replaceAll('*', '.*')
-    return new RegExp(`^${escaped}$`, 'u').test(actual)
-  }
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() <= deadline) {
-    const current = tab.view.webContents.getURL()
-    const navigationReady = afterVersion === undefined || tab.navigationVersion > afterVersion
-    if (navigationReady && urlMatches(current)) {
-      if (waitUntil === 'commit') return { ok: true, tabId: tab.id, url: current, version: tab.navigationVersion, waitUntil }
-      const response = await debuggerCommand(tab, 'Runtime.evaluate', {
-        expression: 'document.readyState',
-        returnByValue: true,
-      }).catch(() => undefined) as { result?: { value?: unknown } } | undefined
-      const readyState = response?.result?.value
-      const stateReady = waitUntil === 'domcontentloaded'
-        ? readyState === 'interactive' || readyState === 'complete'
-        : readyState === 'complete' && !tab.loading
-      if (stateReady) return { ok: true, tabId: tab.id, url: current, version: tab.navigationVersion, waitUntil }
+  const current = await readNavigationState(tab, debuggerCommand)
+  const supplied = request.before
+  let before: BrowserNavigationState
+  if (supplied !== undefined) {
+    if (supplied === null || typeof supplied !== 'object' || Array.isArray(supplied)) throw new Error('before 导航状态无效。')
+    const value = supplied as Partial<BrowserNavigationState>
+    if (typeof value.version !== 'number' || typeof value.url !== 'string' || typeof value.title !== 'string'
+      || typeof value.h1 !== 'string' || typeof value.text !== 'string') throw new Error('before 导航状态无效。')
+    before = {
+      version: value.version,
+      url: value.url,
+      title: value.title,
+      h1: value.h1,
+      text: value.text,
+      readyState: typeof value.readyState === 'string' ? value.readyState : 'complete',
+      loading: value.loading === true,
+      inflightRequests: typeof value.inflightRequests === 'number' ? value.inflightRequests : 0,
+      networkActivityVersion: typeof value.networkActivityVersion === 'number' ? value.networkActivityVersion : 0,
+      networkIdleMs: typeof value.networkIdleMs === 'number' ? value.networkIdleMs : 0,
+      kind: value.kind === 'same-document' ? 'same-document' : 'document',
     }
-    await new Promise<void>((resolve) => setTimeout(resolve, 100))
+  } else {
+    before = { ...current, version: afterVersion ?? current.version }
   }
-  const target = expectedUrl === undefined ? '下一次导航' : `URL ${expectedUrl}`
-  throw new Error(`等待${target}超时（${String(timeoutMs)}ms）。`)
+  const outcome = await waitForNavigationStability(tab, before, {
+    timeoutMs,
+    waitUntil: waitUntil as BrowserNavigationWaitOptions['waitUntil'],
+    ...(typeof expectedUrl === 'string' ? { expectedUrl } : {}),
+    requireNavigation,
+    acceptCurrent: !requireNavigation,
+  }, debuggerCommand)
+  if (outcome.status === 'success') {
+    return {
+      ok: true,
+      tabId: tab.id,
+      status: outcome.status,
+      url: outcome.state.url,
+      version: outcome.state.version,
+      waitUntil,
+      elapsedMs: outcome.elapsedMs,
+    }
+  }
+  const target = expectedUrl === undefined
+    ? (requireNavigation ? '下一次导航' : '页面状态')
+    : `URL ${expectedUrl}`
+  const pending = [...tab.inflightRequestDetails?.values() ?? []]
+    .slice(0, 3)
+    .map((entry) => `${entry.type}:${entry.url}`)
+  const pendingSummary = pending.length === 0 ? '' : `，未完成请求：${pending.join(', ')}`
+  const networkSummary = waitUntil !== 'networkidle'
+    ? ''
+    : `，网络：${outcome.state.inflightRequests} 个请求 / 空闲 ${Math.round(outcome.state.networkIdleMs)}ms`
+  throw new Error(`等待${target}超时（${String(timeoutMs)}ms，状态：${outcome.status}，原因：${String(outcome.reason)}${networkSummary}${pendingSummary}）。`)
 }
 
 export async function evaluatePage(
@@ -178,24 +451,11 @@ export async function evaluatePage(
   request: DesktopBrowserAgentRequest,
   debuggerCommand: BrowserDebuggerCommand,
 ): Promise<Record<string, unknown>> {
-  if (typeof request.script !== 'string' || request.script.trim().length === 0 || request.script.length > 8_000) {
-    throw new Error('evaluate script 必须是 1–8000 字符的字符串。')
-  }
-  const forbidden = /(?:\b(?:fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon)\b|\b(?:localStorage|sessionStorage|indexedDB|caches)\b|\b(?:location|history)\s*\.|\.\s*(?:click|focus|blur|submit|remove|append|appendChild|prepend|replaceWith|setAttribute|removeAttribute|dispatchEvent)\s*\(|\.(?:innerHTML|outerHTML|textContent|value|checked)\s*=)/u
-  if (forbidden.test(request.script)) throw new Error('evaluate 只允许只读页面检查，脚本包含可能修改页面或发起网络请求的操作。')
-  let argument: string
-  try {
-    argument = JSON.stringify(request.argument ?? null)
-  } catch {
-    throw new Error('evaluate argument 必须可 JSON 序列化。')
-  }
-  if (argument.length > 32_000) throw new Error('evaluate argument 过大。')
-  const source = request.script.trim()
+  const { source, argument, timeoutMs } = prepareReadOnlyEvaluation(request)
   const callable = /^(?:async\s*)?(?:function\b|\(?\s*[A-Za-z_$][\w$]*(?:\s*,[^)]*)?\)?\s*=>|\(.*\)\s*=>)/su.test(source)
   const expression = callable
     ? `Promise.resolve((${source})(${argument}))`
     : `Promise.resolve((${source}))`
-  const timeoutMs = request.timeoutMs === undefined ? 5_000 : positiveInteger(request.timeoutMs, 'timeoutMs', 250, 15_000)
   const result = await Promise.race([
     debuggerCommand(tab, 'Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }),
     new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error(`evaluate 超时（${String(timeoutMs)}ms）。`)), timeoutMs)),

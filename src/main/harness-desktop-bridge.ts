@@ -6,7 +6,7 @@ import type { DesktopNotificationService } from './desktop-notifications.js'
 import type { DesktopBrowserService } from './desktop-browser.js'
 
 const CONTROL_HOST = '127.0.0.1'
-const MAX_REQUEST_BYTES = 65_536
+const MAX_REQUEST_BYTES = 8 * 1_024 * 1_024
 const DEFAULT_RESTART_DELAY_MS = 1_500
 
 export interface HarnessDesktopBridgeLaunch {
@@ -41,7 +41,6 @@ export class HarnessDesktopBridgeHost {
   private launch: HarnessDesktopBridgeLaunch | undefined
   private restartTimer: NodeJS.Timeout | undefined
   private restartPending = false
-
   constructor(private readonly options: HarnessDesktopBridgeOptions) {}
 
   async start(): Promise<HarnessDesktopBridgeLaunch> {

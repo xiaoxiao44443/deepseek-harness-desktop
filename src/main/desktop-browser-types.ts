@@ -48,6 +48,8 @@ export interface BrowserLocatorStep {
   kind: BrowserLocatorKind
   value: string
   name?: string
+  namePattern?: string
+  nameFlags?: string
   exact?: boolean
 }
 
@@ -72,7 +74,27 @@ export interface BrowserLocatorResolution {
   checked?: boolean
   selectedValues?: string[]
   selectedLabels?: string[]
+  evaluation?: unknown
+  mediaUrl?: string
   error?: string
+}
+
+export type BrowserPageAssetKind = 'script' | 'font' | 'image' | 'stylesheet' | 'video' | 'other'
+
+export interface BrowserPageAsset {
+  id: string
+  kind: BrowserPageAssetKind
+  name: string
+  url: string
+  sources: Array<{ kind: 'attribute' | 'computedStyle' | 'resource'; nodeId?: number; property?: string }>
+}
+
+export interface BrowserPageAssetInventory {
+  id: string
+  tabId: string
+  pageUrl: string | null
+  assets: BrowserPageAsset[]
+  inlineSvgs: Array<{ id: string; markup: string; name: string }>
 }
 
 export interface BrowserSnapshotCache {
@@ -109,10 +131,19 @@ export interface BrowserTabRuntime {
   agentActive: boolean
   snapshotVersion: number
   navigationVersion: number
+  lastNavigationKind: 'document' | 'same-document'
+  inflightRequests: Set<string>
+  inflightRequestDetails?: Map<string, { url: string; type: string; startedAt: number }>
+  networkActivityVersion?: number
+  networkIdleSince: number
+  lastOpened: string
+  retentionMark?: 'handoff' | 'completed'
+  claimedFromUser?: boolean
   snapshotTargets: Map<number, SnapshotTarget>
   lastSnapshot?: BrowserSnapshotCache
   viewport?: DesktopBrowserViewport
   backgroundViewportActive: boolean
+  syntheticBlankHistory: boolean
   historyTimer: NodeJS.Timeout | undefined
   consoleLogs: Array<{ level: 'debug' | 'info' | 'log' | 'warn' | 'error'; message: string; timestamp: string; url?: string }>
   debuggerConfigured: boolean
@@ -136,6 +167,7 @@ export interface DesktopBrowserAgentRequest {
   timeoutMs?: unknown
   waitUntil?: unknown
   afterVersion?: unknown
+  before?: unknown
   key?: unknown
   modifiers?: unknown
   values?: unknown
@@ -172,4 +204,18 @@ export interface DesktopBrowserAgentRequest {
   paths?: unknown
   accept?: unknown
   promptText?: unknown
+  userTab?: unknown
+  queries?: unknown
+  from?: unknown
+  to?: unknown
+  name?: unknown
+  status?: unknown
+  items?: unknown
+  exportType?: unknown
+  inventoryId?: unknown
+  assetIds?: unknown
+  kinds?: unknown
+  button?: unknown
+  keypress?: unknown
+  path?: unknown
 }
