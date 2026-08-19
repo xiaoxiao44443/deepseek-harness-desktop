@@ -16,6 +16,7 @@ import type {
   DesktopBrowserViewport,
   FloatingBrowserWindowState,
 } from '../shared/contracts.js'
+import { AgentPointerIcon } from './AgentPointerIcon.js'
 
 const EMPTY_STATE: FloatingBrowserWindowState = {
   loading: false,
@@ -40,21 +41,6 @@ function DisplayModeIcon({ mode }: { mode: BrowserDisplayMode }): React.JSX.Elem
     return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 9V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v10c0 1.1.9 2 2 2h4"/><rect width="10" height="7" x="12" y="13" rx="2"/></svg>
   }
   return <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d={mode === 'split' ? 'M12 4v16' : 'M14 4v16'}/></svg>
-}
-
-function AgentPointer(): React.JSX.Element {
-  return (
-    <svg className="agent-pointer" viewBox="0 0 24 30" aria-label="Agent 正在操作">
-      <defs>
-        <linearGradient id="floating-agent-pointer" x1="3" y1="2" x2="17" y2="25" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#9edbff" />
-          <stop offset=".48" stopColor="#5b8cff" />
-          <stop offset="1" stopColor="#8a63ff" />
-        </linearGradient>
-      </defs>
-      <path d="M2.7 1.9v20.2l5.15-4.86 3.65 8.42 4.06-1.76-3.58-8.27 7.36-.2L2.7 1.9Z" fill="url(#floating-agent-pointer)" stroke="white" strokeWidth="1.45" strokeLinejoin="round" />
-    </svg>
-  )
 }
 
 function TabFavicon({ url }: { url?: string }): React.JSX.Element {
@@ -85,7 +71,7 @@ function BrowserTab({ tab, active }: { tab: DesktopBrowserTabState; active: bool
       >
         {tab.loading ? <RotateCw className="floating-tab-loading" aria-label="正在加载" /> : <TabFavicon url={tab.faviconUrl} />}
         <span className="floating-tab-title">{label}</span>
-        {tab.agentActive ? <AgentPointer /> : null}
+        {tab.agentActive ? <AgentPointerIcon className="agent-pointer" /> : null}
       </button>
       <button type="button" className="floating-tab-close" aria-label={`关闭 ${label}`} onClick={() => void invoke('close-tab', tab.id)}>
         <X aria-hidden="true" />

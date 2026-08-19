@@ -23,6 +23,10 @@
   --dialog-bg: rgba(31, 33, 38, 0.72);
   --dialog-primary-bg: #f1f2f5;
   --dialog-primary-text: #202228;
+  --agent-pointer-fill: #f5f7fb;
+  --agent-pointer-stroke: rgba(7, 11, 17, 0.9);
+  --agent-pointer-glow: rgba(75, 183, 255, 0.92);
+  --agent-pointer-glow-soft: rgba(48, 137, 255, 0.58);
 }
 
 * { box-sizing: border-box; }
@@ -369,7 +373,8 @@ body.maximized .restore-icon { display: block; }
   height: 19px;
   flex: none;
   overflow: visible;
-  filter: drop-shadow(0 0 3px rgba(95,151,255,.95)) drop-shadow(0 0 7px rgba(105,118,255,.62));
+  color: var(--agent-pointer-fill);
+  filter: drop-shadow(0 0 2px var(--agent-pointer-glow)) drop-shadow(0 0 5px var(--agent-pointer-glow-soft));
   animation: browser-agent-pointer-pulse 1.25s ease-in-out infinite;
 }
 
@@ -1489,6 +1494,10 @@ body.maximized .restore-icon { display: block; }
   --dialog-bg: rgba(240, 243, 249, 0.48);
   --dialog-primary-bg: #272a30;
   --dialog-primary-text: #f6f7f9;
+  --agent-pointer-fill: #11161d;
+  --agent-pointer-stroke: rgba(255, 255, 255, 0.94);
+  --agent-pointer-glow: rgba(52, 181, 255, 0.95);
+  --agent-pointer-glow-soft: rgba(44, 139, 255, 0.56);
 }
 
 :root[data-theme="light"] .loader {

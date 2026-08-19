@@ -2791,7 +2791,7 @@ export class DesktopBrowserService extends EventEmitter {
   private async pointer(tab: BrowserTabRuntime, x: number, y: number, pressed: boolean): Promise<void> {
     const contents = tab.view.webContents
     if (contents === undefined || contents.isDestroyed()) return
-    contents.send(POINTER_CHANNEL, { x, y, pressed })
+    contents.send(POINTER_CHANNEL, { x, y, pressed, theme: this.theme })
   }
 
   private async writeJson(path: string, value: unknown): Promise<void> {

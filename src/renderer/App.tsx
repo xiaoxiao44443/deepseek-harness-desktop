@@ -3,6 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { ReactNode } from 'react'
 import type { BrowserDisplayMode, DesktopApplicationMenuAction, DesktopBrowserHistoryEntry, DesktopBrowserShellSnapshot, DesktopBrowserViewport, DesktopState, DevelopmentState, PluginRecoveryEntry, TitleMenuAction } from '../shared/contracts.js'
 import type { DesktopContextMenuRequest } from '../shared/context-menu.js'
+import { AgentPointerIcon } from './AgentPointerIcon.js'
 import { ContextMenu } from './ContextMenu.js'
 import appIconUrl from '../../app-icon.png'
 import titlebarIconUrl from '../../titlebar-icon.png'
@@ -29,14 +30,6 @@ function FloatingWindowIcon(): ReactNode {
 
 function BrowserPanelIcon({ open }: { open: boolean }): ReactNode {
   return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="3.5" />{open ? <path d="M14.5 4.5v15" strokeLinecap="square" /> : <path d="M17.25 8.5v7" />}</svg>
-}
-
-function AgentPointerIcon({ id }: { id: string }): ReactNode {
-  const gradientId = `agent-pointer-${id.replaceAll(/[^a-z0-9_-]/giu, '-')}`
-  return <svg className="browser-agent-pointer" width="15" height="19" viewBox="0 0 24 30" fill="none" aria-label="Agent 正在操作">
-    <defs><linearGradient id={gradientId} x1="3" y1="2" x2="17" y2="25" gradientUnits="userSpaceOnUse"><stop stopColor="#9edbff" /><stop offset=".48" stopColor="#5b8cff" /><stop offset="1" stopColor="#8a63ff" /></linearGradient></defs>
-    <path d="M2.7 1.9v20.2l5.15-4.86 3.65 8.42 4.06-1.76-3.58-8.27 7.36-.2L2.7 1.9Z" fill={`url(#${gradientId})`} stroke="white" strokeWidth="1.45" strokeLinejoin="round" />
-  </svg>
 }
 
 function usePresence(open: boolean, exitDuration = 130): { mounted: boolean; phase: DialogPhase } {
@@ -787,7 +780,7 @@ export function App(): ReactNode {
                     const selected = state.browser.activeTabId === tab.id
                     return <div key={tab.id} className={`browser-tab${selected ? ' active' : ''}`} title={label}>
                       <button className="browser-tab-main" type="button" role="tab" aria-selected={selected} onClick={() => void desktopApi.selectBrowserTab(tab.id)}>
-                        {tab.loading ? <RotateCw className="browser-tab-loading" aria-label="正在加载" /> : <span className="browser-tab-favicon" aria-hidden="true"><Globe2 />{tab.faviconUrl ? <img src={tab.faviconUrl} alt="" referrerPolicy="no-referrer" onError={(event) => { event.currentTarget.hidden = true }} /> : null}</span>}<span className="browser-tab-title">{label}</span>{tab.agentActive ? <AgentPointerIcon id={tab.id} /> : null}
+                        {tab.loading ? <RotateCw className="browser-tab-loading" aria-label="正在加载" /> : <span className="browser-tab-favicon" aria-hidden="true"><Globe2 />{tab.faviconUrl ? <img src={tab.faviconUrl} alt="" referrerPolicy="no-referrer" onError={(event) => { event.currentTarget.hidden = true }} /> : null}</span>}<span className="browser-tab-title">{label}</span>{tab.agentActive ? <AgentPointerIcon className="browser-agent-pointer" /> : null}
                       </button>
                       <button className="browser-tab-close" type="button" aria-label={`关闭 ${label}`} onClick={(event) => { event.stopPropagation(); void desktopApi.closeBrowserTab(tab.id) }}><X /></button>
                     </div>

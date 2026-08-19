@@ -10,6 +10,7 @@ interface PointerMessage {
   y?: unknown
   pressed?: unknown
   hidden?: unknown
+  theme?: unknown
 }
 
 let pointerBody: HTMLElement | undefined
@@ -26,8 +27,8 @@ function installPointer(): HTMLElement | undefined {
   host.style.setProperty('position', 'fixed', 'important')
   host.style.setProperty('left', '0', 'important')
   host.style.setProperty('top', '0', 'important')
-  host.style.setProperty('width', '24px', 'important')
-  host.style.setProperty('height', '30px', 'important')
+  host.style.setProperty('width', '20px', 'important')
+  host.style.setProperty('height', '25px', 'important')
   host.style.setProperty('z-index', '2147483647', 'important')
   host.style.setProperty('pointer-events', 'none', 'important')
   host.style.setProperty('overflow', 'visible', 'important')
@@ -35,11 +36,19 @@ function installPointer(): HTMLElement | undefined {
   host.style.setProperty('transform', 'translate3d(-40px,-40px,0)', 'important')
   host.style.setProperty('transition', 'opacity 90ms ease, filter 90ms ease', 'important')
   const shadow = host.attachShadow({ mode: 'closed' })
+  const style = document.createElement('style')
+  style.textContent = `
+    :host{--pointer-fill:#11161d;--pointer-stroke:rgba(255,255,255,.94);--pointer-glow:rgba(52,181,255,.95);--pointer-glow-soft:rgba(44,139,255,.56)}
+    :host([data-theme="dark"]){--pointer-fill:#f5f7fb;--pointer-stroke:rgba(7,11,17,.9);--pointer-glow:rgba(75,183,255,.92);--pointer-glow-soft:rgba(48,137,255,.58)}
+    .pointer{width:20px;height:25px;color:var(--pointer-fill);filter:drop-shadow(0 0 2px var(--pointer-glow)) drop-shadow(0 0 6px var(--pointer-glow-soft));transform-origin:2.8px 2.1px;transition:transform 90ms ease,filter 90ms ease}
+    .pointer.pressed{transform:scale(.82);filter:drop-shadow(0 0 3px var(--pointer-glow)) drop-shadow(0 0 10px var(--pointer-glow-soft)) brightness(1.08)}
+    @media(prefers-color-scheme:dark){:host(:not([data-theme="light"])){--pointer-fill:#f5f7fb;--pointer-stroke:rgba(7,11,17,.9);--pointer-glow:rgba(75,183,255,.92);--pointer-glow-soft:rgba(48,137,255,.58)}}
+  `
   const pointer = document.createElement('div')
-  pointer.innerHTML = '<svg width="24" height="30" viewBox="0 0 24 30" fill="none" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="agent-pointer-fill" x1="3" y1="2" x2="17" y2="25" gradientUnits="userSpaceOnUse"><stop stop-color="#9EDBFF"/><stop offset=".48" stop-color="#5B8CFF"/><stop offset="1" stop-color="#8A63FF"/></linearGradient><filter id="agent-pointer-aura" x="-100%" y="-100%" width="300%" height="300%"><feGaussianBlur stdDeviation="2.8"/></filter></defs><path d="M2.7 1.9v20.2l5.15-4.86 3.65 8.42 4.06-1.76-3.58-8.27 7.36-.2L2.7 1.9Z" fill="#6E9BFF" opacity=".9" filter="url(#agent-pointer-aura)"/><path d="M2.7 1.9v20.2l5.15-4.86 3.65 8.42 4.06-1.76-3.58-8.27 7.36-.2L2.7 1.9Z" fill="url(#agent-pointer-fill)" stroke="white" stroke-width="1.45" stroke-linejoin="round"/></svg>'
-  pointer.style.cssText = 'width:24px;height:30px;filter:drop-shadow(0 0 3px rgba(95,151,255,.95)) drop-shadow(0 0 9px rgba(105,118,255,.72));transform-origin:3px 2px;transition:transform 90ms ease,filter 90ms ease'
+  pointer.className = 'pointer'
+  pointer.innerHTML = '<svg width="20" height="25" viewBox="0 0 20 25" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2.8 2.1v17.55l4.4-4.1 3.32 7.65 3.72-1.62-3.24-7.46 6.42-.17L2.8 2.1Z" fill="currentColor" stroke="var(--pointer-stroke)" stroke-width="1.2" stroke-linejoin="round"/></svg>'
   pointerBody = pointer
-  shadow.appendChild(pointer)
+  shadow.append(style, pointer)
   root.appendChild(host)
   return host
 }
@@ -55,6 +64,7 @@ function ensurePointer(): HTMLElement | undefined {
 ipcRenderer.on(CHANNEL, (_event, raw: PointerMessage) => {
   const host = ensurePointer()
   if (host === undefined) return
+  if (raw.theme === 'dark' || raw.theme === 'light') host.dataset.theme = raw.theme
   if (raw.hidden === true) {
     host.style.setProperty('opacity', '0', 'important')
     return
@@ -68,10 +78,7 @@ ipcRenderer.on(CHANNEL, (_event, raw: PointerMessage) => {
     return
   }
   const pressed = raw.pressed === true
-  pointerBody.style.transform = pressed ? 'scale(.82)' : 'scale(1)'
-  pointerBody.style.filter = pressed
-    ? 'drop-shadow(0 0 5px rgba(136,207,255,1)) drop-shadow(0 0 14px rgba(105,118,255,.95)) brightness(1.18)'
-    : 'drop-shadow(0 0 3px rgba(95,151,255,.95)) drop-shadow(0 0 9px rgba(105,118,255,.72))'
+  pointerBody.classList.toggle('pressed', pressed)
 })
 
 interface PageMenuPayload {
