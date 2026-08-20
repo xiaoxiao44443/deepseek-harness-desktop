@@ -35,6 +35,7 @@ type ContextValue<T> = T | ((context: DesktopContextMenuContext) => T)
 export interface DesktopContextMenuContribution {
   id: string
   label: ContextValue<string>
+  linkURL?: ContextValue<string>
   icon?: DesktopContextMenuIcon
   group?: string
   order?: number

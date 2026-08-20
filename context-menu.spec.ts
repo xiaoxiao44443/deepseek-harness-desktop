@@ -35,6 +35,23 @@ describe('desktop context menu protocol', () => {
     })
   })
 
+  it('accepts a sanitized HTTP target contributed by a menu provider', () => {
+    expect(parsePluginContextMenuCollection({
+      token: 'menu-link',
+      items: [],
+      linkURL: 'http://127.0.0.1:43210/artifacts/demo/index.html',
+    })).toEqual({
+      token: 'menu-link',
+      items: [],
+      linkURL: 'http://127.0.0.1:43210/artifacts/demo/index.html',
+    })
+    expect(parsePluginContextMenuCollection({
+      token: 'menu-file',
+      items: [],
+      linkURL: 'file:///C:/private/index.html',
+    })).toBeUndefined()
+  })
+
   it('keeps the menu inside the viewport', () => {
     expect(clampContextMenuPosition(790, 590, 220, 180, 800, 600)).toEqual({ x: 572, y: 412 })
     expect(clampContextMenuPosition(-20, -40, 220, 180, 800, 600)).toEqual({ x: 8, y: 8 })

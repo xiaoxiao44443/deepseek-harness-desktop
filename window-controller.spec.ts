@@ -91,9 +91,28 @@ vi.mock('electron', async () => {
   }
 })
 
-import { WindowController } from './src/main/window-controller.js'
+import {
+  parseHarnessThemePreference,
+  resolveHarnessThemePreference,
+  WindowController,
+} from './src/main/window-controller.js'
 import { RUNTIME_PREPARATION_PROGRESS_EVENT } from './src/main/harness-runtime.js'
 import { DESKTOP_CONTEXT_MENU_TRANSPORT_KEY } from './src/shared/context-menu.js'
+
+describe('Harness theme preference parsing', () => {
+  it('recognizes explicit and system preferences without matching unrelated settings', () => {
+    expect(parseHarnessThemePreference('ui-theme:\n  preference: system\n')).toBe('system')
+    expect(parseHarnessThemePreference('ui-theme:\r\n  preference: "dark" # keep\r\n')).toBe('dark')
+    expect(parseHarnessThemePreference('other:\n  preference: light\n')).toBeUndefined()
+  })
+
+  it('resolves only the system preference through the operating-system scheme', () => {
+    expect(resolveHarnessThemePreference('system', false)).toBe('light')
+    expect(resolveHarnessThemePreference('system', true)).toBe('dark')
+    expect(resolveHarnessThemePreference('light', true)).toBe('light')
+    expect(resolveHarnessThemePreference('dark', false)).toBe('dark')
+  })
+})
 
 describe('WindowController Harness reload', () => {
   it('publishes bundled runtime extraction progress only during preparation', async () => {
@@ -351,6 +370,7 @@ describe('WindowController Harness reload', () => {
           return {
             token: 'cordis-menu-token',
             items: [{ kind: 'item', id: 'plugin.archive', label: '归档', enabled: true, icon: 'archive' }],
+            linkURL: 'http://127.0.0.1:43214/api/dsh-visualize/artifacts/session/artifact/index.html',
           }
         }
         return true
@@ -393,7 +413,10 @@ describe('WindowController Harness reload', () => {
       .map(([, request]) => request)
       .find((request) => request.items.some((item: { id?: string }) => item.id === 'plugin.archive'))
     expect(request).toMatchObject({
-      items: expect.arrayContaining([expect.objectContaining({ id: 'plugin.archive', label: '归档' })]),
+      items: expect.arrayContaining([
+        expect.objectContaining({ id: 'desktop.open-link-in-browser', label: '在内置浏览器中打开' }),
+        expect.objectContaining({ id: 'plugin.archive', label: '归档' }),
+      ]),
     })
     const select = electronMocks.ipcHandlers.get('desktop:context-menu-select')
     expect(select).toBeDefined()

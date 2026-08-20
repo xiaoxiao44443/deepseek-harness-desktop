@@ -24,6 +24,21 @@ const HARNESS_LOAD_READY_FALLBACK_MS = 3_000
 const HARNESS_CHANGES_URL = 'https://github.com/deepseek-ai/deepseek-harness/commits/master/'
 const MAX_CLIPBOARD_IMAGE_PIXELS = 100_000_000
 
+type ColorThemePreference = ColorTheme | 'system'
+
+export function parseHarnessThemePreference(settings: string): ColorThemePreference | undefined {
+  const themeBlock = settings.match(/^ui-theme\s*:\s*(?:#.*)?\r?\n((?:[ \t]+[^\r\n]*(?:\r?\n|$))*)/m)?.[1]
+  const preference = themeBlock?.match(/^\s+preference\s*:\s*['"]?(dark|light|system)['"]?\s*(?:#.*)?$/mi)?.[1]
+  return preference === 'dark' || preference === 'light' || preference === 'system' ? preference : undefined
+}
+
+export function resolveHarnessThemePreference(
+  preference: ColorThemePreference,
+  systemDark: boolean,
+): ColorTheme {
+  return preference === 'system' ? systemDark ? 'dark' : 'light' : preference
+}
+
 interface PendingHarnessLoad {
   url: string
   resolve: () => void
@@ -504,7 +519,7 @@ export class WindowController {
       const request: DesktopContextMenuRequest = { requestId, x: params.x, y: params.y, items: builtins }
       window.webContents.send(CONTEXT_MENU_CHANNEL, request)
       void pluginCollectionPromise.then((pluginCollection) => {
-        this.updateOpenContextMenuWithPlugins(sequence, requestId, frame, builtins, pluginCollection)
+        this.updateOpenContextMenuWithPlugins(sequence, requestId, frame, params, builtins, pluginCollection)
       })
       return
     }
@@ -518,7 +533,13 @@ export class WindowController {
       return
     }
 
-    const items = appendPluginContextMenuItems(builtins, pluginCollection?.items ?? [])
+    const effectiveLinkURL = params.linkURL || pluginCollection?.linkURL || ''
+    const effectiveBuiltins = effectiveLinkURL === params.linkURL
+      ? builtins
+      : buildBuiltinContextMenuItems({ ...params, linkURL: effectiveLinkURL }, {
+        embeddedBrowserEnabled: this.browser?.state.settings.enabled === true,
+      })
+    const items = appendPluginContextMenuItems(effectiveBuiltins, pluginCollection?.items ?? [])
     if (!items.some((entry) => entry.kind === 'item')) return
     const requestId = `menu-${Date.now().toString(36)}-${sequence.toString(36)}`
     this.pendingContextMenu = {
@@ -527,7 +548,7 @@ export class WindowController {
       contents: window.webContents,
       x: params.x,
       y: params.y,
-      linkURL: params.linkURL,
+      linkURL: effectiveLinkURL,
       srcURL: params.srcURL,
       selectionText: params.selectionText,
       allowedItemIds: new Set(items.flatMap((entry) => entry.kind === 'item' && entry.enabled ? [entry.id] : [])),
@@ -546,6 +567,7 @@ export class WindowController {
     sequence: number,
     requestId: string,
     frame: WebFrameMain,
+    params: ContextMenuParams,
     builtins: DesktopContextMenuRequest['items'],
     pluginCollection: PluginContextMenuCollection | undefined,
   ): void {
@@ -560,7 +582,14 @@ export class WindowController {
       void this.releasePluginContextMenu({ frame, pluginToken: pluginCollection.token }, false)
       return
     }
-    const items = appendPluginContextMenuItems(builtins, pluginCollection.items)
+    const effectiveLinkURL = params.linkURL || pluginCollection.linkURL || ''
+    const effectiveBuiltins = effectiveLinkURL === params.linkURL
+      ? builtins
+      : buildBuiltinContextMenuItems({ ...params, linkURL: effectiveLinkURL }, {
+        embeddedBrowserEnabled: this.browser?.state.settings.enabled === true,
+      })
+    const items = appendPluginContextMenuItems(effectiveBuiltins, pluginCollection.items)
+    pending.linkURL = effectiveLinkURL
     pending.allowedItemIds = new Set(items.flatMap((entry) => entry.kind === 'item' && entry.enabled ? [entry.id] : []))
     pending.pluginToken = pluginCollection.token
     this.window?.webContents.send(CONTEXT_MENU_CHANNEL, {
@@ -973,35 +1002,8 @@ export class WindowController {
       if (frame === undefined) return
       this.themeProbeInFlight = true
       try {
-        const theme = await frame.executeJavaScript(`(() => {
-          const root = document.documentElement;
-          const body = document.body;
-          if (body?.hasAttribute('data-ds-dark-theme')) return 'dark';
-          const declaredScheme = root.style.colorScheme || getComputedStyle(root).colorScheme;
-          if (declaredScheme === 'dark' || declaredScheme === 'light') return declaredScheme;
-          const explicit = [
-            root.dataset.theme,
-            root.getAttribute('data-color-theme'),
-            root.getAttribute('data-mode'),
-            body?.dataset.theme,
-            ...root.classList,
-            ...(body ? [...body.classList] : []),
-          ].filter(Boolean).join(' ').toLowerCase();
-          if (/(^|[\\s_-])dark($|[\\s_-])/.test(explicit)) return 'dark';
-          if (/(^|[\\s_-])light($|[\\s_-])/.test(explicit)) return 'light';
-
-          const candidates = [body, document.querySelector('#root'), root].filter(Boolean);
-          for (const element of candidates) {
-            const color = getComputedStyle(element).backgroundColor;
-            const match = color.match(/rgba?\\(\\s*(\\d+)[, ]+\\s*(\\d+)[, ]+\\s*(\\d+)(?:[^)]*?([\\d.]+))?\\s*\\)/i);
-            if (!match || (match[4] !== undefined && Number(match[4]) < 0.2)) continue;
-            const red = Number(match[1]);
-            const green = Number(match[2]);
-            const blue = Number(match[3]);
-            return (red * 0.2126 + green * 0.7152 + blue * 0.0722) < 145 ? 'dark' : 'light';
-          }
-          return matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-        })()`) as ColorTheme
+        const preference = await this.readConfiguredThemePreference()
+        const theme = resolveHarnessThemePreference(preference, nativeTheme.shouldUseDarkColors)
         if ((theme === 'dark' || theme === 'light') && theme !== this.theme) {
           this.theme = theme
           this.browser?.setTheme(theme)
@@ -1017,16 +1019,19 @@ export class WindowController {
     this.themeProbeTimer = setInterval(() => { void probe() }, 300)
   }
 
-  private async readConfiguredTheme(): Promise<ColorTheme> {
+  private async readConfiguredThemePreference(): Promise<ColorThemePreference> {
     try {
       const settings = await readFile(join(this.runtime.harnessHome, 'settings.yaml'), 'utf8')
-      const themeBlock = settings.match(/^ui-theme\s*:\s*(?:#.*)?\r?\n((?:[ \t]+[^\r\n]*(?:\r?\n|$))*)/m)?.[1]
-      const preference = themeBlock?.match(/^\s+preference\s*:\s*['"]?(dark|light|system)['"]?\s*(?:#.*)?$/mi)?.[1]
-      if (preference === 'dark' || preference === 'light') return preference
+      return parseHarnessThemePreference(settings) ?? 'system'
     } catch {
-      // Harness creates settings.yaml lazily; the system theme remains the safe fallback.
+      // Harness creates settings.yaml lazily; its default preference is system.
+      return 'system'
     }
-    return nativeTheme.shouldUseDarkColors ? 'dark' : 'light'
+  }
+
+  private async readConfiguredTheme(): Promise<ColorTheme> {
+    const preference = await this.readConfiguredThemePreference()
+    return resolveHarnessThemePreference(preference, nativeTheme.shouldUseDarkColors)
   }
 
   private stopThemeSync(): void {

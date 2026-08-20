@@ -61,6 +61,7 @@ export interface DesktopPointerInput {
 export interface PluginContextMenuCollection {
   token: string
   items: ContextMenuEntry[]
+  linkURL?: string
 }
 
 const iconNames = new Set<string>(CONTEXT_MENU_ICONS)
@@ -77,6 +78,17 @@ function boundedText(value: unknown, maxLength: number): string | undefined {
   if (typeof value !== 'string') return undefined
   const text = value.trim()
   return text.length > 0 && text.length <= maxLength && !/[\r\n\0]/u.test(text) ? text : undefined
+}
+
+function safeWebURL(value: unknown): string | undefined {
+  const text = boundedText(value, 2_048)
+  if (text === undefined) return undefined
+  try {
+    const url = new URL(text)
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : undefined
+  } catch {
+    return undefined
+  }
 }
 
 function parseEntry(value: unknown): ContextMenuEntry | undefined {
@@ -127,8 +139,9 @@ export function parsePluginContextMenuCollection(value: unknown): PluginContextM
   if (token === undefined) return undefined
   const items = sanitizeContextMenuEntries(candidate?.items)
     .filter((entry) => entry.kind === 'separator' || entry.id.startsWith('plugin.'))
-  if (!items.some((entry) => entry.kind === 'item')) return undefined
-  return { token, items }
+  const linkURL = safeWebURL(candidate?.linkURL)
+  if (!items.some((entry) => entry.kind === 'item') && linkURL === undefined) return undefined
+  return { token, items, ...(linkURL === undefined ? {} : { linkURL }) }
 }
 
 export function clampContextMenuPosition(

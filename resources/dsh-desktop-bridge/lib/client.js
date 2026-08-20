@@ -81,6 +81,7 @@ window.__ModuleLoader__.load({
 			if (!rawId || !/^[a-z0-9][a-z0-9._:-]{0,79}$/iu.test(rawId)) throw new TypeError("Context menu contribution id is invalid");
 			if (typeof value.onSelect !== "function") throw new TypeError("Context menu contribution requires onSelect(context)");
 			if (typeof value.label !== "string" && typeof value.label !== "function") throw new TypeError("Context menu contribution label is invalid");
+			if (value.linkURL !== undefined && typeof value.linkURL !== "string" && typeof value.linkURL !== "function") throw new TypeError("Context menu contribution linkURL is invalid");
 			const group = boundedMenuText(value.group, 48) ?? "plugins";
 			const order = Number.isFinite(value.order) ? Math.max(-10_000, Math.min(10_000, value.order)) : 0;
 			return {
@@ -152,6 +153,7 @@ window.__ModuleLoader__.load({
 						contribution,
 						group: contribution.group,
 						order: contribution.order,
+						linkURL: boundedMenuText(resolveContributionValue(contribution.linkURL, context, ""), 2_048),
 						item: {
 							kind: "item",
 							id: contribution.id,
@@ -163,7 +165,9 @@ window.__ModuleLoader__.load({
 						}
 					});
 				}
-				if (evaluated.length === 0) return null;
+				const contributedLinks = [...new Set(evaluated.flatMap((entry) => entry.linkURL === undefined ? [] : [entry.linkURL]))];
+				const linkURL = context.linkUrl || (contributedLinks.length === 1 ? contributedLinks[0] : "");
+				if (evaluated.length === 0 && linkURL === "") return null;
 				evaluated.sort((left, right) => left.group.localeCompare(right.group) || left.order - right.order || left.item.id.localeCompare(right.item.id));
 
 				const items = [];
@@ -182,7 +186,7 @@ window.__ModuleLoader__.load({
 				const token = `plugin-menu-${Date.now().toString(36)}-${(++state.token).toString(36)}`;
 				state.invocations.set(token, { context, actions });
 				while (state.invocations.size > 8) state.invocations.delete(state.invocations.keys().next().value);
-				return { token, items };
+				return { token, items, ...(linkURL === "" ? {} : { linkURL }) };
 			}
 
 			[executeContextMenuSymbol](token, itemId) {
@@ -257,7 +261,7 @@ window.__ModuleLoader__.load({
 							"register(contribution: DesktopContextMenuContribution): () => void"
 						],
 						types: {
-							DesktopContextMenuContribution: "{ id: string; label: string | ((context) => string); icon?: ContextMenuIcon; group?: string; order?: number; when?: (context) => boolean; enabled?: boolean | ((context) => boolean); checked?: boolean | ((context) => boolean); danger?: boolean | ((context) => boolean); onSelect(context): void | Promise<void> }",
+							DesktopContextMenuContribution: "{ id: string; label: string | ((context) => string); linkURL?: string | ((context) => string); icon?: ContextMenuIcon; group?: string; order?: number; when?: (context) => boolean; enabled?: boolean | ((context) => boolean); checked?: boolean | ((context) => boolean); danger?: boolean | ((context) => boolean); onSelect(context): void | Promise<void> }",
 							DesktopContextMenuContext: "{ target: Element; editableElement: HTMLInputElement | HTMLTextAreaElement | HTMLElement | null; editable: boolean; selectionText: string; linkUrl: string; x: number; y: number; event: MouseEvent }"
 						},
 						icons: [...CONTEXT_MENU_ICONS],
