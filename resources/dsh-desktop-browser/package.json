@@ -1,7 +1,7 @@
 {
   "name": "dsh-desktop-browser",
   "version": "0.1.0",
-  "description": "DeepSeek Harness Desktop built-in browser integration",
+  "description": "DFY DSH Desktop built-in browser integration",
   "type": "module",
   "main": "./lib/index.js",
   "exports": {

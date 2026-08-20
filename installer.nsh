@@ -32,7 +32,8 @@ Function un.DesktopDataPageLeave
   ${NSD_GetState} $DeleteDesktopDataCheckbox $0
   ${If} $0 == ${BST_CHECKED}
     SetShellVarContext current
-    DetailPrint "Deleting DeepSeek Harness Desktop local data..."
+    DetailPrint "Deleting DFY DSH Desktop local data..."
+    RMDir /r "$PROFILE\.saltfish\dfy-dsh-desktop"
     RMDir /r "$PROFILE\.saltfish\deepseek-harness-desktop"
     # Remove the vendor directory only when no other Saltfish product uses it.
     RMDir "$PROFILE\.saltfish"

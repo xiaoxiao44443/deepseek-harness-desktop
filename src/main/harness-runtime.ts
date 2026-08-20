@@ -15,7 +15,7 @@ import { applyHarnessRuntimeCompatibility } from './runtime-compat.js'
 const require = createRequire(import.meta.url)
 const HARNESS_PACKAGE = '@deepseek-ai/dsh'
 export const DESKTOP_PNPM_VERSION = '11.19.0'
-const BUNDLED_RUNTIME_POLICY_VERSION = 3
+const BUNDLED_RUNTIME_POLICY_VERSION = 5
 const REGISTRY_METADATA = 'https://registry.npmjs.org/@deepseek-ai%2Fdsh'
 const UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000
 export const RUNTIME_PREPARATION_PROGRESS_EVENT = 'prepare-progress'
@@ -55,7 +55,8 @@ export class HarnessRuntimeManager extends EventEmitter {
   private readonly versionsRoot: string
   private readonly stagingRoot: string
   private readonly statePath: string
-  private readonly npmCache: string
+  private readonly packageStore: string
+  private readonly legacyNpmCache: string
   private state: HarnessRuntimeState | undefined
   private bundled: HarnessRuntimeCandidate | undefined
   private updateView: RuntimeUpdateView = { status: 'idle' }
@@ -67,7 +68,7 @@ export class HarnessRuntimeManager extends EventEmitter {
     private readonly electronExecutable: string,
     private readonly bundledRuntimeRoot?: string,
     private readonly bundledArchivePath?: string,
-    private readonly packagedNpmCli?: string,
+    private readonly packagedPnpmCli?: string,
   ) {
     super()
     this.runtimeRoot = join(userDataPath, 'harness-runtime')
@@ -75,7 +76,8 @@ export class HarnessRuntimeManager extends EventEmitter {
     this.versionsRoot = join(this.runtimeRoot, 'versions')
     this.stagingRoot = join(this.runtimeRoot, 'staging')
     this.statePath = join(this.runtimeRoot, 'state.json')
-    this.npmCache = join(this.runtimeRoot, 'npm-cache')
+    this.packageStore = join(this.runtimeRoot, 'package-store')
+    this.legacyNpmCache = join(this.runtimeRoot, 'npm-cache')
   }
 
   async initialize(): Promise<void> {
@@ -219,16 +221,24 @@ export class HarnessRuntimeManager extends EventEmitter {
     const stagingPath = join(this.stagingRoot, `${version}-${Date.now()}-${process.pid}`)
     await mkdir(stagingPath, { recursive: true })
     try {
-      await this.resetNpmCache()
+      await this.resetPackageStore()
       await writeFile(join(stagingPath, 'package.json'), `${JSON.stringify({
-        name: 'deepseek-harness-managed-runtime',
+        name: 'dfy-dsh-desktop-managed-runtime',
         private: true,
-        allowScripts: INSTALL_SCRIPT_POLICY,
+        dependencies: {
+          [HARNESS_PACKAGE]: version,
+          pnpm: DESKTOP_PNPM_VERSION,
+        },
       }, null, 2)}\n`, 'utf8')
-      await this.runNode(this.resolveNpmCli(), [
-        'install', '--prefix', stagingPath, '--omit=dev', '--no-audit', '--no-fund', '--no-save',
-        '--package-lock=false', '--strict-allow-scripts=true', `${HARNESS_PACKAGE}@${version}`,
-        `pnpm@${DESKTOP_PNPM_VERSION}`,
+      await writeFile(join(stagingPath, 'pnpm-workspace.yaml'), [
+        'minimumReleaseAge: 0',
+        'allowBuilds:',
+        ...Object.entries(INSTALL_SCRIPT_POLICY).map(([name, allowed]) => `  ${JSON.stringify(name)}: ${String(allowed)}`),
+        '',
+      ].join('\n'), 'utf8')
+      await this.runNode(this.resolvePnpmCli(), [
+        'install', '--dir', stagingPath, '--prod', '--no-lockfile', '--prefer-offline',
+        '--store-dir', this.packageStore, '--package-import-method', 'copy',
       ])
       const stagedEntry = join(stagingPath, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
       const stagedPnpmEntry = join(stagingPath, 'node_modules', 'pnpm', 'bin', 'pnpm.cjs')
@@ -241,7 +251,7 @@ export class HarnessRuntimeManager extends EventEmitter {
       await rm(stagingPath, { recursive: true, force: true })
       throw error
     } finally {
-      await this.removePath(this.npmCache)
+      await this.removePath(this.packageStore)
     }
   }
 
@@ -252,7 +262,7 @@ export class HarnessRuntimeManager extends EventEmitter {
           ...process.env,
           ELECTRON_RUN_AS_NODE: '1',
           ELECTRON_NO_ATTACH_CONSOLE: '1',
-          npm_config_cache: this.npmCache,
+          CI: 'true',
           npm_config_update_notifier: 'false',
         },
         windowsHide: true,
@@ -268,8 +278,8 @@ export class HarnessRuntimeManager extends EventEmitter {
     })
   }
 
-  private resolveNpmCli(): string {
-    return this.packagedNpmCli ?? join(dirname(require.resolve('npm/package.json')), 'bin', 'npm-cli.js')
+  private resolvePnpmCli(): string {
+    return this.packagedPnpmCli ?? join(dirname(require.resolve('pnpm')), 'bin', 'pnpm.cjs')
   }
 
   private async ensureBundledRuntimeExtracted(): Promise<void> {
@@ -387,7 +397,8 @@ export class HarnessRuntimeManager extends EventEmitter {
       this.removeObsoleteBundledRuntimes(),
       this.removeObsoleteManagedRuntimes(managedVersionsToKeep),
       this.removePath(this.stagingRoot),
-      this.removePath(this.npmCache),
+      this.removePath(this.packageStore),
+      this.removePath(this.legacyNpmCache),
     ])
   }
 
@@ -411,9 +422,9 @@ export class HarnessRuntimeManager extends EventEmitter {
     }))
   }
 
-  private async resetNpmCache(): Promise<void> {
-    await this.removePath(this.npmCache)
-    await mkdir(this.npmCache, { recursive: true })
+  private async resetPackageStore(): Promise<void> {
+    await this.removePath(this.packageStore)
+    await mkdir(this.packageStore, { recursive: true })
   }
 
   private async removePath(path: string): Promise<void> {

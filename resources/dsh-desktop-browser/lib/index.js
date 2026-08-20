@@ -1,11 +1,18 @@
 import { Script, createContext } from 'node:vm'
+import {
+  RESOURCE_PROTOCOL_VERSION,
+  encodeResourceReference,
+  getProcessResourceRegistry,
+} from './resource-core-runtime.js'
 
 export const name = 'desktop-browser'
-export const inject = ['tools', 'skills', 'webServer']
+export const inject = ['tools', 'skills', 'webServer', 'llm', 'attachments']
 
 const SETTINGS_PATH = '/api/dsh-desktop/browser/settings'
 const HISTORY_PATH = '/api/dsh-desktop/browser/history'
 const CLEAR_DATA_PATH = '/api/dsh-desktop/browser/clear-data'
+const SCREENSHOTS_PATH = '/api/dsh-desktop/browser/screenshots'
+const REVEAL_SCREENSHOTS_PATH = '/api/dsh-desktop/browser/screenshots/reveal'
 const AGENT_STATUS_PATH = '/v1/browser/agent-status'
 const MAX_PROXY_BODY_BYTES = 65_536
 const MAX_BROWSER_SCRIPT_CHARS = 16_000
@@ -13,8 +20,10 @@ const MAX_BROWSER_SCRIPT_ACTIONS = 80
 const MAX_BROWSER_SCRIPT_CLEANUP_ACTIONS = 16
 const BROWSER_SCRIPT_TIMEOUT_MS = 90_000
 const BROWSER_SCRIPT_SYNC_TIMEOUT_MS = 1_000
+const BROWSER_RESOURCE_PROVIDER = 'desktop-browser'
+const MAX_SCREENSHOT_RESOURCE_BYTES = 32 * 1_024 * 1_024
 
-export const BROWSER_SKILL = `Use the DeepSeek Harness Desktop built-in browser for interactive web work.
+export const BROWSER_SKILL = `Use the DFY DSH Desktop built-in browser for interactive web work.
 
 Before the first browser action in a DSH conversation, call browser_execute exactly once with:
 
@@ -24,10 +33,16 @@ Read the complete returned control guide before using any other browser API. Do 
 
 The browser is bound to the current DSH conversation. A new turn does not invalidate it. If a tab is stale or missing, recover with browser.tabs.list(), browser.tabs.get(id), or browser.tabs.new(); do not treat a tab error as a reason to reread the guide.
 
-Use browser_execute for the documented browser object only. Keep browser work in the background by default, and show a tab only when the user asks to see it or visible inspection materially helps. Prefer a dedicated API or connector for semantic operations when one is available; use the built-in browser for visible or interactive page work.`
+Use browser_execute for the documented browser object only. Keep browser work in the background by default, and show a tab only when the user asks to see it or visible inspection materially helps. Prefer a dedicated API or connector for semantic operations when one is available; use the built-in browser for visible or interactive page work.
+
+After navigation, wait for a deterministic postcondition such as the expected URL or target UI. Never swallow a failed readiness wait and replace it with an arbitrary fixed sleep.
+
+Create temporary tabs inside try/finally and close or finalize them in finally, including when navigation, readiness, screenshot, or visual analysis fails.
+
+Browser screenshots already live in the desktop temporary cache. Treat resourceRef as an opaque token: copy it unchanged into the visual tool argument and never reconstruct, shorten, or rewrite it. Do not copy a temporary screenshot into the workspace or request attachment persistence merely to analyze it; only save or attach it when the user explicitly asks.`
 
 export const BROWSER_CONTROL_DOCUMENTATION = `# Selected Browser
-- Name: DeepSeek Harness Built-in Browser
+- Name: DFY DSH Desktop Built-in Browser
 - Type: isolated in-app browser
 
 Reuse this browser binding across later turns. A new turn or tab error does not invalidate it. If a tab is stale or missing, obtain or create a fresh tab from this browser rather than treating the entire browser as unavailable.
@@ -67,7 +82,7 @@ Tab API:
 - tab.playwright is the preferred semantic page API.
 - tab.cua is the coordinate fallback for canvas, maps, and other surfaces without useful DOM semantics. Prefer Playwright locators first.
 - tab.dom_cua exposes snapshot node IDs as a compact semantic fallback when a stable Locator is unavailable.
-- await tab.scroll({ top?, left?, deltaX?, deltaY? }), tab.screenshot({ fullPage?, clip? }), tab.setViewport({ width, height, deviceScaleFactor? }), and tab.show(visible) are desktop presentation helpers.
+- await tab.scroll({ top?, left?, deltaX?, deltaY? }), tab.screenshot({ rect?: { x, y, width, height } }), tab.setViewport({ width, height, deviceScaleFactor? }), and tab.show(visible) are desktop presentation helpers. Screenshot rectangles use current-viewport CSS pixels; fully out-of-bounds or empty regions fail explicitly.
 
 Playwright API:
 - await tab.playwright.domSnapshot() returns a textual DOM snapshot. Reuse the latest relevant snapshot until navigation or a significant DOM change.
@@ -81,7 +96,10 @@ Playwright API:
 - await tab.playwright.waitForLoadState({ state?: "load"|"domcontentloaded"|"networkidle", timeoutMs? }), waitForURL(url, { timeoutMs?, waitUntil? }), and waitForTimeout(timeoutMs) wait for page state. networkidle requires zero tracked HTTP requests for at least 500ms.
 - await tab.playwright.expectNavigation(action, { url?, timeoutMs?, waitUntil? }) synchronizes an action with the navigation it triggers and returns the action result.
 - await tab.playwright.evaluate(pageFunction, arg?, { timeoutMs? }) performs bounded read-only page inspection. Use locators for interaction.
-- tab.playwright.elementInfo({ x, y, includeNonInteractable? }) maps screenshot coordinates back to locator-oriented DOM metadata; elementScreenshot(...) saves an annotated viewport image.
+- tab.playwright.elementInfo({ x, y, includeNonInteractable? }) maps screenshot coordinates back to locator-oriented DOM metadata; elementScreenshot({ x, y }) captures the element at those viewport coordinates.
+- await locator.screenshot() captures that element; await tab.screenshot({ rect: { x, y, width, height } }) captures a CSS-pixel region inside the current visual viewport. Both return PNG metadata, an absolute temporary path, and an opaque resourceRef. A native image-capable parent receives the official image block automatically. A text-only parent can pass resourceRef to dfy_vision_analyze when that optional tool is available; otherwise use the readable path, dimensions, and source URL without failing.
+- A screenshot path belongs to the desktop temporary cache. Pass resourceRef directly for visual analysis; do not copy the PNG into the workspace or persist it as an attachment unless the user explicitly asks to save or attach it.
+- Treat resourceRef as an opaque token. Copy it unchanged into a tool argument; never reconstruct, shorten, or rewrite it in prose.
 - await tab.dev.logs({ filter?, levels?, limit? }) reads captured console messages for debugging.
 - tab.playwright.waitForEvent("filechooser"|"download") follows the Playwright promise-before-action pattern. File chooser results expose isMultiple() and setFiles(pathOrPaths); downloads expose path(). Upload only files the user placed in scope.
 - await tab.getJsDialog() returns the active alert/confirm/prompt/beforeunload object when present; use its accept()/dismiss() method before continuing.
@@ -89,13 +107,13 @@ Playwright API:
 Coordinate fallback API:
 - await tab.cua.click({ x, y, button?, keypress? }), double_click({ x, y, keypress? }), move({ x, y, keys? }), drag({ path, keys? }), keypress({ keys }), type({ text }), and scroll({ x, y, scrollX, scrollY, keypress? }) mirror the compact Codex CUA shape. Drag preserves intermediate path points.
 - Take tab.screenshot() immediately before coordinate work and do not reuse coordinates after navigation, scrolling, resizing, or a significant visual change.
-- await tab.dom_cua.get_visible_dom() returns the current snapshot text and binds its node IDs. Then use click({ node_id }), double_click({ node_id }), scroll({ node_id?, x, y }), keypress({ keys }), or type({ text }). Refresh it after significant page changes.
+- await tab.dom_cua.get_visible_dom() returns the current snapshot text and binds its node IDs. Then use click({ node_id }), double_click({ node_id }), screenshot({ node_id }), scroll({ node_id?, x, y }), keypress({ keys }), or type({ text }). Refresh it after significant page changes.
 
 Workflow:
 1. Reuse a suitable tab from browser.tabs.list(), or create one with browser.tabs.new(). Keep the returned Tab binding through the task.
 2. Call tab.playwright.domSnapshot() before constructing a locator. Build locators only from roles, names, text, labels, test ids, or stable attributes present in that snapshot.
 3. Before click, fill, press, or selectOption, call count() unless uniqueness is already certain. Proceed only when the locator resolves to exactly one element.
-4. After navigation or a significant interaction, verify the cheapest explicit postcondition: waitForURL() for a route, locator.waitFor() for business UI, or a fresh snapshot when the next decision needs new locator ground truth. Do not use title, H1, or arbitrary fixed sleeps as a generic SPA-ready signal.
+4. After navigation or a significant interaction, verify the cheapest explicit postcondition: waitForURL() for a route, locator.waitFor() for business UI, or a fresh snapshot when the next decision needs new locator ground truth. Do not swallow a failed readiness wait, and do not use title, H1, or arbitrary fixed sleeps as a generic SPA-ready signal.
 5. Repeated snapshots keep stable element refs within the same document and report incremental changes for orientation.
 6. Keep one script focused. Return the final snapshot or useful operation result. The runtime allows up to 80 ordinary browser actions per script; close() and tabs.finalize() use a separate reserved cleanup allowance so finally blocks can still run after the ordinary budget is exhausted. Prefer one read-only evaluate() when several related page-state values can be collected together.
 7. Use tab.show(true) only when the user asks to see the page or visible inspection materially helps. Never claim a hidden background page is visible to the user.
@@ -175,6 +193,21 @@ function browserTraceEntry(action, result) {
   if (result.navigation?.status !== undefined) entry.navigationStatus = result.navigation.status
   if (Array.isArray(result.tabs)) entry.tabCount = result.tabs.length
   return entry
+}
+
+function withScreenshotResourceReference(result) {
+  if (!result || typeof result !== 'object' || Array.isArray(result)
+    || typeof result.resourceId !== 'string'
+    || result.mimeType !== 'image/png') return result
+  return {
+    ...result,
+    resourceRef: encodeResourceReference({
+      version: RESOURCE_PROTOCOL_VERSION,
+      provider: BROWSER_RESOURCE_PROVIDER,
+      kind: 'image',
+      id: result.resourceId,
+    }),
+  }
 }
 
 function browserBootstrapSource() {
@@ -312,6 +345,7 @@ function browserBootstrapSource() {
         getAttribute: async (name, options = {}) => (await invoke("get-attribute", { ...object(options), attribute: string(name, "getAttribute") })).value,
         isVisible: async () => (await invoke("is-visible")).value,
         isEnabled: async () => (await invoke("is-enabled")).value,
+        screenshot: async (options = {}) => invoke("screenshot", object(options)),
         waitFor: async (options = {}) => { await invoke("wait-for", object(options)); },
       };
       locatorPlans.set(locator, { id, plan });
@@ -425,6 +459,7 @@ function browserBootstrapSource() {
         },
         click: async (options) => { await call("click", { tabId: id, ...node(options) }); },
         double_click: async (options) => { await call("click", { tabId: id, ...node(options), clickCount: 2 }); },
+        screenshot: async (options) => call("screenshot", { tabId: id, ...node(options) }),
         keypress: async (options) => {
           const keys = object(options).keys;
           if (!Array.isArray(keys) || keys.length === 0 || keys.some((key) => typeof key !== "string" || key.length === 0)) throw new Error("keypress requires a non-empty keys array");
@@ -579,6 +614,7 @@ async function executeBrowserScript(code, sessionId, controlUrl, controlToken) {
 
   const startedAt = Date.now()
   const trace = []
+  const screenshotResources = []
   let actionCount = 0
   let cleanupActionCount = 0
   let lastResult
@@ -606,11 +642,24 @@ async function executeBrowserScript(code, sessionId, controlUrl, controlToken) {
     }
     const remainingMs = BROWSER_SCRIPT_TIMEOUT_MS - (Date.now() - startedAt)
     if (remainingMs <= 0) throw new Error('Browser script timed out')
-    const result = await desktopRequest(controlUrl, controlToken, '/v1/browser/action', {
+    const response = await desktopRequest(controlUrl, controlToken, '/v1/browser/action', {
       method: 'POST',
       body: { ...args, action, sessionId },
       timeoutMs: Math.max(250, Math.min(browserActionTimeout(action), remainingMs)),
     })
+    const result = withScreenshotResourceReference(response)
+    if (typeof result?.resourceRef === 'string') {
+      screenshotResources.push({
+        resourceRef: result.resourceRef,
+        path: result.path,
+        mimeType: result.mimeType,
+        bytes: result.bytes,
+        width: result.width,
+        height: result.height,
+        sourceUrl: result.sourceUrl ?? result.url,
+        capturedAt: result.capturedAt,
+      })
+    }
     trace.push(browserTraceEntry(action, result))
     lastResult = result
     return JSON.stringify(result)
@@ -645,6 +694,7 @@ ${code}
     return JSON.stringify({
       result: returned.hasValue ? returned.value : lastResult ?? null,
       actions: trace,
+      ...(screenshotResources.length === 0 ? {} : { screenshotResources }),
     }, null, 2)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -656,10 +706,99 @@ ${code}
   }
 }
 
-function createBrowserExecuteTool(controlUrl, controlToken) {
+function browserScreenshotProvider(controlUrl, controlToken) {
+  return {
+    id: BROWSER_RESOURCE_PROVIDER,
+    async resolve(reference, signal) {
+      if (reference.kind !== 'image' || !/^[A-Za-z0-9_-]{43}$/.test(reference.id)) return undefined
+      const url = endpoint(controlUrl, `/v1/browser/screenshot-resources/${reference.id}`)
+      const response = await fetch(url, {
+        headers: { authorization: `Bearer ${controlToken}` },
+        signal: signal === undefined ? AbortSignal.timeout(30_000) : AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
+      })
+      if (response.status === 404) return undefined
+      if (!response.ok) throw new Error(`Desktop screenshot resource failed: HTTP ${response.status}`)
+      if (response.headers.get('content-type')?.split(';', 1)[0]?.trim() !== 'image/png') {
+        throw new Error('Desktop screenshot resource returned an unexpected media type')
+      }
+      const declared = Number(response.headers.get('content-length'))
+      if (Number.isFinite(declared) && declared > MAX_SCREENSHOT_RESOURCE_BYTES) {
+        await response.body?.cancel()
+        throw new Error('Desktop screenshot resource exceeds the byte limit')
+      }
+      const data = new Uint8Array(await response.arrayBuffer())
+      if (data.byteLength === 0 || data.byteLength > MAX_SCREENSHOT_RESOURCE_BYTES
+        || data[0] !== 0x89 || data[1] !== 0x50 || data[2] !== 0x4e || data[3] !== 0x47
+        || data[4] !== 0x0d || data[5] !== 0x0a || data[6] !== 0x1a || data[7] !== 0x0a) {
+        throw new Error('Desktop screenshot resource is not a valid bounded PNG')
+      }
+      return { kind: 'image', data, bytes: data.byteLength, mediaType: 'image/png' }
+    },
+  }
+}
+
+function serializedAttachment(ref) {
+  return {
+    attachmentId: String(ref.attachmentId),
+    mediaType: ref.mediaType,
+    bytes: ref.bytes,
+    width: ref.width,
+    height: ref.height,
+    ...(ref.name === undefined ? {} : { name: ref.name }),
+  }
+}
+
+function renderBrowserExecuteResult(value) {
+  let parsed
+  try { parsed = JSON.parse(value) } catch { return [{ type: 'text', text: value }] }
+  const nativeImages = Array.isArray(parsed?._nativeImages) ? parsed._nativeImages : []
+  if (parsed && typeof parsed === 'object') delete parsed._nativeImages
+  return [
+    { type: 'text', text: JSON.stringify(parsed, null, 2) },
+    ...nativeImages.map((attachment) => ({ type: 'image', attachment })),
+  ]
+}
+
+async function promoteNativeScreenshots(ctx, exec, value) {
+  const provider = exec?.agent?.options?.provider
+  const model = exec?.agent?.options?.model
+  if (typeof provider !== 'string' || typeof model !== 'string') return value
+  const info = await ctx.llm.resolveModelInfo(provider, model, exec.signal).catch(() => undefined)
+  if (info?.inputModalities?.includes('image') !== true) return value
+  let parsed
+  try { parsed = JSON.parse(value) } catch { return value }
+  const resources = Array.isArray(parsed?.screenshotResources) ? parsed.screenshotResources.slice(0, 4) : []
+  if (resources.length === 0) return value
+  const registry = getProcessResourceRegistry()
+  const attachments = []
+  for (const resource of resources) {
+    if (typeof resource?.resourceRef !== 'string') continue
+    try {
+      const image = await registry.resolve(resource.resourceRef, 'image', exec.signal)
+      if (image.mediaType !== 'image/png' || image.data === undefined) continue
+      const name = typeof resource.path === 'string'
+        ? resource.path.split(/[\\/]/).filter(Boolean).at(-1)?.slice(0, 255)
+        : undefined
+      const ref = await ctx.attachments.saveImage({
+        data: image.data,
+        mediaType: 'image/png',
+        ...(name === undefined ? {} : { name }),
+      })
+      attachments.push(serializedAttachment(ref))
+    } catch {
+      // A projection failure must not turn a successful screenshot into a tool
+      // error; the readable path/resource fallback remains in the text result.
+    }
+  }
+  if (attachments.length === 0) return value
+  parsed._nativeImages = attachments
+  return JSON.stringify(parsed, null, 2)
+}
+
+function createBrowserExecuteTool(controlUrl, controlToken, ctx) {
   return {
     name: 'browser_execute',
-    description: 'Run one focused JavaScript program against the DeepSeek Harness Desktop built-in browser. Before the first browser action in a conversation, read the complete guide with return await browser.documentation(). Several related browser actions may be awaited in one call.',
+    description: 'Run one focused JavaScript program against the DFY DSH Desktop built-in browser. Before the first browser action in a conversation, read the complete guide with return await browser.documentation(). Several related browser actions may be awaited in one call.',
     parameters: {
       type: 'object',
       properties: {
@@ -674,26 +813,29 @@ function createBrowserExecuteTool(controlUrl, controlToken) {
     },
     output: {
       schema: { type: 'string' },
-      render(_args, value) { return [{ type: 'text', text: value }] },
+      render(_args, value) { return renderBrowserExecuteResult(value) },
     },
     async execute(args, exec) {
       const sessionId = exec?.agent?.id
       if (typeof sessionId !== 'string' || sessionId.length === 0) {
         throw new Error('Desktop browser tools require a calling DSH agent session')
       }
-      return await executeBrowserScript(args.code, sessionId, controlUrl, controlToken)
+      const value = await executeBrowserScript(args.code, sessionId, controlUrl, controlToken)
+      return ctx === undefined ? value : await promoteNativeScreenshots(ctx, exec, value)
     },
   }
 }
 
-export function createBrowserTools(controlUrl, controlToken) {
-  return [createBrowserExecuteTool(controlUrl, controlToken)]
+export function createBrowserTools(controlUrl, controlToken, ctx) {
+  return [createBrowserExecuteTool(controlUrl, controlToken, ctx)]
 }
 
 export async function apply(ctx, overrides = {}) {
   const controlUrl = overrides.controlUrl ?? process.env.DSH_DESKTOP_CONTROL_URL
   const controlToken = overrides.controlToken ?? process.env.DSH_DESKTOP_CONTROL_TOKEN
-  if (!controlUrl || !controlToken) throw new Error('dsh-desktop-browser requires DeepSeek Harness Desktop')
+  if (!controlUrl || !controlToken) throw new Error('dsh-desktop-browser requires DFY DSH Desktop')
+
+  const disposeResourceProvider = getProcessResourceRegistry().registerProvider(browserScreenshotProvider(controlUrl, controlToken))
 
   let disposers = []
   const clearFeatures = () => {
@@ -703,10 +845,10 @@ export async function apply(ctx, overrides = {}) {
     clearFeatures()
     if (settings?.enabled !== true) return
     try {
-      for (const tool of createBrowserTools(controlUrl, controlToken)) disposers.push(ctx.tools.register(tool))
+      for (const tool of createBrowserTools(controlUrl, controlToken, ctx)) disposers.push(ctx.tools.register(tool))
       disposers.push(ctx.skills.register({
         name: 'desktop-browser',
-        description: '控制 DeepSeek Harness Desktop 的隔离内置浏览器，包括快照、点击、输入、截图和可见性。',
+        description: '控制 DFY DSH Desktop 的隔离内置浏览器，包括快照、点击、输入、截图和可见性。',
         source: 'runtime',
         content: BROWSER_SKILL,
         invocation: { modelInvocable: true, userInvocable: true },
@@ -750,6 +892,7 @@ export async function apply(ctx, overrides = {}) {
     }
     trackedAgents.clear()
     clearFeatures()
+    disposeResourceProvider()
   }
 }
 
@@ -758,6 +901,8 @@ function registerRoutes(ctx, controlUrl, controlToken, refreshSettings) {
     [SETTINGS_PATH, '/v1/browser/settings', ['GET', 'PUT']],
     [HISTORY_PATH, '/v1/browser/history', ['GET', 'DELETE']],
     [CLEAR_DATA_PATH, '/v1/browser/clear-data', ['POST']],
+    [SCREENSHOTS_PATH, '/v1/browser/screenshots', ['GET', 'DELETE']],
+    [REVEAL_SCREENSHOTS_PATH, '/v1/browser/screenshots/reveal', ['POST']],
   ]
   for (const [path, target, methods] of routes) {
     ctx.webServer.register({

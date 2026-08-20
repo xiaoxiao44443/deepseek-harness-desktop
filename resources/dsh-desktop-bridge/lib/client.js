@@ -233,7 +233,7 @@ window.__ModuleLoader__.load({
 			return {
 				manifest: {
 					id: "DesktopContextMenu",
-					description: "DeepSeek Harness Desktop context-menu contribution Service.",
+					description: "DFY DSH Desktop context-menu contribution Service.",
 					methods: [{
 						name: "describe",
 						description: "Return the exact Client Service contract, supported icons, and a lifecycle-safe example.",
@@ -654,7 +654,7 @@ window.__ModuleLoader__.load({
 			const onDesktopMessage = (event) => {
 				const value = event.data;
 				if (event.source !== window || value === null || typeof value !== "object") return;
-				if (value.source !== "deepseek-harness-desktop" || value.type !== "notification-click") return;
+				if (value.source !== "dfy-dsh-desktop" || value.type !== "notification-click") return;
 				if (typeof value.sessionId !== "string" || value.sessionId.length === 0) return;
 				try { ctx.sessions.open(value.sessionId); } catch {}
 			};

@@ -29,6 +29,14 @@ describe('HarnessDesktopBridgeHost', () => {
       getHistory: vi.fn(() => []),
       clearHistory: vi.fn(async () => undefined),
       clearBrowsingData: vi.fn(async () => undefined),
+      screenshotCacheStats: vi.fn(async () => ({ path: '/tmp/screenshots', files: 1, bytes: 8 })),
+      clearScreenshotCache: vi.fn(async () => ({ path: '/tmp/screenshots', files: 0, bytes: 0 })),
+      revealScreenshotCache: vi.fn(async () => undefined),
+      getScreenshotResource: vi.fn((resourceId: string) => resourceId === 'a'.repeat(43) ? {
+        mimeType: 'image/png',
+        bytes: 8,
+        data: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      } : undefined),
       handleAgentRequest: vi.fn(async () => ({ ok: true })),
       updateAgentStatus: vi.fn(),
     }
@@ -137,6 +145,21 @@ describe('HarnessDesktopBridgeHost', () => {
     })
     expect(browserAgentStatus.status).toBe(200)
     expect(browser.updateAgentStatus).toHaveBeenCalledWith({ sessionId: 'session-1', status: 'running' })
+
+    const screenshotResource = await fetch(`${controlOrigin}/v1/browser/screenshot-resources/${'a'.repeat(43)}`, {
+      headers: { authorization: `Bearer ${launch.controlToken}` },
+    })
+    expect(screenshotResource.status).toBe(200)
+    expect(screenshotResource.headers.get('content-type')).toBe('image/png')
+    expect(Buffer.from(await screenshotResource.arrayBuffer())).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+
+    const clearedScreenshots = await fetch(`${controlOrigin}/v1/browser/screenshots`, {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${launch.controlToken}` },
+    })
+    expect(clearedScreenshots.status).toBe(200)
+    expect(browser.clearScreenshotCache).toHaveBeenCalledOnce()
+    expect(browser.clearBrowsingData).not.toHaveBeenCalled()
 
   })
 })

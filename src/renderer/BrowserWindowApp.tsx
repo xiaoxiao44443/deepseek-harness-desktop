@@ -189,7 +189,7 @@ export function BrowserWindowApp(): React.JSX.Element {
   }, [])
   useEffect(() => {
     if (document.activeElement !== addressRef.current) setAddress(state.url)
-    document.title = state.title && state.url ? `${state.title} - DeepSeek Harness 浏览器` : 'DeepSeek Harness 浏览器'
+    document.title = state.title && state.url ? `${state.title} - DFY DSH Desktop 浏览器` : 'DFY DSH Desktop 浏览器'
   }, [state.title, state.url])
 
   const submitAddress = (event: FormEvent<HTMLFormElement>): void => {

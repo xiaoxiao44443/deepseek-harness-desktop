@@ -127,16 +127,40 @@ export class HarnessDesktopBridgeHost {
     controlToken: string,
   ): Promise<void> {
     const pathname = new URL(request.url ?? '/', 'http://127.0.0.1').pathname
+    const screenshotResource = /^\/v1\/browser\/screenshot-resources\/([A-Za-z0-9_-]{43})$/u.exec(pathname)
     const supported = pathname === '/v1/restart-harness'
       || pathname === '/v1/notifications/settings'
       || pathname === '/v1/notifications/show'
       || pathname === '/v1/browser/settings'
       || pathname === '/v1/browser/history'
       || pathname === '/v1/browser/clear-data'
+      || pathname === '/v1/browser/screenshots'
+      || pathname === '/v1/browser/screenshots/reveal'
       || pathname === '/v1/browser/agent-status'
       || pathname === '/v1/browser/action'
+      || screenshotResource !== null
     if (!supported) {
       this.sendJson(response, 404, { accepted: false, message: 'Not found' })
+      return
+    }
+
+    if (screenshotResource !== null) {
+      if (request.method !== 'GET') {
+        response.setHeader('allow', 'GET')
+        this.sendJson(response, 405, { accepted: false, message: 'Method not allowed' })
+        return
+      }
+      const resource = this.options.browser.getScreenshotResource(screenshotResource[1]!)
+      if (resource === undefined) {
+        this.sendJson(response, 404, { accepted: false, message: 'Screenshot resource is unavailable or expired' })
+        return
+      }
+      response.statusCode = 200
+      response.setHeader('content-type', resource.mimeType)
+      response.setHeader('content-length', String(resource.bytes))
+      response.setHeader('cache-control', 'no-store')
+      response.setHeader('x-content-type-options', 'nosniff')
+      response.end(resource.data)
       return
     }
     if (request.headers.authorization !== `Bearer ${controlToken}`) {
@@ -208,6 +232,31 @@ export class HarnessDesktopBridgeHost {
       }
       await this.options.browser.clearBrowsingData()
       this.sendJson(response, 200, { cleared: true })
+      return
+    }
+
+    if (pathname === '/v1/browser/screenshots') {
+      if (request.method === 'GET') {
+        this.sendJson(response, 200, { cache: await this.options.browser.screenshotCacheStats() })
+        return
+      }
+      if (request.method === 'DELETE') {
+        this.sendJson(response, 200, { cleared: true, cache: await this.options.browser.clearScreenshotCache() })
+        return
+      }
+      response.setHeader('allow', 'GET, DELETE')
+      this.sendJson(response, 405, { accepted: false, message: 'Method not allowed' })
+      return
+    }
+
+    if (pathname === '/v1/browser/screenshots/reveal') {
+      if (request.method !== 'POST') {
+        response.setHeader('allow', 'POST')
+        this.sendJson(response, 405, { accepted: false, message: 'Method not allowed' })
+        return
+      }
+      await this.options.browser.revealScreenshotCache()
+      this.sendJson(response, 200, { revealed: true })
       return
     }
 

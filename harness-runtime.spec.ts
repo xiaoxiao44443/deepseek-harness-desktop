@@ -90,6 +90,7 @@ describe('Harness runtime storage cleanup', () => {
       const pendingVersion = join(versionsRoot, '0.2.0')
       const orphanedVersion = join(versionsRoot, '0.3.0')
       const npmCache = join(runtimeRoot, 'npm-cache')
+      const packageStore = join(runtimeRoot, 'package-store')
       const stagingRoot = join(runtimeRoot, 'staging')
 
       await Promise.all([
@@ -99,9 +100,11 @@ describe('Harness runtime storage cleanup', () => {
         writeRuntimeFixture(pendingVersion, '0.2.0'),
         writeRuntimeFixture(orphanedVersion, '0.3.0'),
         mkdir(join(npmCache, '_cacache'), { recursive: true }),
+        mkdir(join(packageStore, 'v11'), { recursive: true }),
         mkdir(join(stagingRoot, 'abandoned-install'), { recursive: true }),
       ])
       await writeFile(join(npmCache, '_cacache', 'content'), 'cached package')
+      await writeFile(join(packageStore, 'v11', 'index.db'), 'cached package')
       await writeFile(join(stagingRoot, 'abandoned-install', 'package.json'), '{}')
       await writeFile(join(runtimeRoot, 'state.json'), `${JSON.stringify({
         schemaVersion: 1,
@@ -122,6 +125,7 @@ describe('Harness runtime storage cleanup', () => {
       expect(await pathExists(pendingVersion)).toBe(true)
       expect(await pathExists(orphanedVersion)).toBe(false)
       expect(await pathExists(npmCache)).toBe(false)
+      expect(await pathExists(packageStore)).toBe(false)
       expect(await pathExists(stagingRoot)).toBe(false)
 
       const state = JSON.parse(await readFile(join(runtimeRoot, 'state.json'), 'utf8')) as {

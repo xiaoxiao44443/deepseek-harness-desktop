@@ -124,7 +124,7 @@ export class WindowController {
         : { frame: false }),
       backgroundColor: process.platform === 'win32' ? '#00FFFFFF' : opaqueBackground,
       ...(process.platform === 'win32' ? { backgroundMaterial: 'acrylic' as const } : {}),
-      title: 'DeepSeek Harness',
+      title: 'DFY DSH Desktop',
       icon: this.resourcePath('app-icon.png'),
       webPreferences: {
         preload: fileURLToPath(new URL('../preload.cjs', import.meta.url)),
@@ -319,7 +319,7 @@ export class WindowController {
     const frame = this.findHarnessFrame()
     if (frame === undefined) return
     const message = JSON.stringify({
-      source: 'deepseek-harness-desktop',
+      source: 'dfy-dsh-desktop',
       type: 'notification-click',
       sessionId,
     })

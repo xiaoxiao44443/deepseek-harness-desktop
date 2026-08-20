@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events'
 import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { app, BrowserWindow, clipboard, ipcMain, nativeImage, session, WebContentsView, type NativeImage, type Rectangle, type WebContents, type WebFrameMain } from 'electron'
+import { app, BrowserWindow, clipboard, ipcMain, nativeImage, session, shell, WebContentsView, type BrowserWindowConstructorOptions, type NativeImage, type Rectangle, type WebContents, type WebFrameMain } from 'electron'
 import type {
   BrowserDisplayMode,
   BrowserMenuKind,
@@ -58,6 +58,15 @@ import {
   positiveInteger,
   sameBounds,
 } from './desktop-browser-utils.js'
+import {
+  BrowserScreenshotStore,
+  MAX_BROWSER_SCREENSHOT_EDGE,
+  MAX_BROWSER_SCREENSHOT_PIXELS,
+  cssRectToImageCrop,
+  type BrowserScreenshotCacheStats,
+  type BrowserScreenshotResource,
+  type CssScreenshotRect,
+} from './browser-screenshot-store.js'
 
 export { DEFAULT_BROWSER_SETTINGS, normalizeBrowserAddress, normalizeBrowserSettings } from './desktop-browser-utils.js'
 export type { DesktopBrowserAgentRequest } from './desktop-browser-types.js'
@@ -76,6 +85,27 @@ const MAX_SNAPSHOT_ELEMENTS = 220
 const BACKGROUND_VIEWPORT = Object.freeze({ width: 1280, height: 800 })
 const EMPTY_BROWSER_URL = `data:text/html;charset=utf-8,${encodeURIComponent('<!doctype html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{width:100%;height:100%;margin:0}</style></head><body></body></html>')}`
 const MANUAL_TAB_ID = 'manual'
+
+export function browserScreenshotCaptureWindowOptions(
+  bounds: Pick<Rectangle, 'width' | 'height'>,
+): BrowserWindowConstructorOptions {
+  return {
+    show: false,
+    frame: false,
+    focusable: false,
+    skipTaskbar: true,
+    hasShadow: false,
+    transparent: true,
+    opacity: 0,
+    backgroundColor: '#00000000',
+    paintWhenInitiallyHidden: true,
+    x: -32_000,
+    y: -32_000,
+    width: Math.max(1, bounds.width),
+    height: Math.max(1, bounds.height),
+    webPreferences: { backgroundThrottling: false },
+  }
+}
 
 function inputModifierState(value: unknown): { altKey: boolean; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean; mask: number } {
   if (value === undefined) return { altKey: false, ctrlKey: false, metaKey: false, shiftKey: false, mask: 0 }
@@ -103,7 +133,7 @@ function mouseButton(value: unknown): { cdp: 'left' | 'middle' | 'right' | 'back
 export class DesktopBrowserService extends EventEmitter {
   private readonly settingsPath: string
   private readonly historyPath: string
-  private readonly screenshotsPath: string
+  private readonly screenshotStore: BrowserScreenshotStore
   private readonly downloadsPath: string
   private readonly exportsPath: string
   private settings: DesktopBrowserSettings = { ...DEFAULT_BROWSER_SETTINGS }
@@ -150,14 +180,19 @@ export class DesktopBrowserService extends EventEmitter {
     })
     this.settingsPath = join(dataRoot, 'settings.json')
     this.historyPath = join(dataRoot, 'history.json')
-    this.screenshotsPath = join(dataRoot, 'screenshots')
+    this.screenshotStore = new BrowserScreenshotStore(join(dataRoot, 'screenshots'))
     this.downloadsPath = join(dataRoot, 'downloads')
     this.exportsPath = join(dataRoot, 'exports')
   }
 
   async initialize(): Promise<void> {
     this.registerFloatingWindowIpc()
-    await Promise.all([mkdir(this.dataRoot, { recursive: true }), mkdir(this.downloadsPath, { recursive: true }), mkdir(this.exportsPath, { recursive: true })])
+    await Promise.all([
+      mkdir(this.dataRoot, { recursive: true }),
+      mkdir(this.downloadsPath, { recursive: true }),
+      mkdir(this.exportsPath, { recursive: true }),
+      this.screenshotStore.initialize(),
+    ])
     try {
       this.settings = normalizeBrowserSettings(JSON.parse(await readFile(this.settingsPath, 'utf8')))
     } catch {
@@ -788,6 +823,24 @@ export class DesktopBrowserService extends EventEmitter {
     ])
   }
 
+  async clearScreenshotCache(): Promise<BrowserScreenshotCacheStats> {
+    return await this.screenshotStore.clear()
+  }
+
+  async screenshotCacheStats(): Promise<BrowserScreenshotCacheStats> {
+    return await this.screenshotStore.stats()
+  }
+
+  async revealScreenshotCache(): Promise<void> {
+    await mkdir(this.screenshotStore.rootPath, { recursive: true })
+    const error = await shell.openPath(this.screenshotStore.rootPath)
+    if (error.length > 0) throw new Error(`无法打开浏览器截图缓存：${error}`)
+  }
+
+  getScreenshotResource(resourceId: string): BrowserScreenshotResource | undefined {
+    return this.screenshotStore.get(resourceId)
+  }
+
   async handleAgentRequest(request: DesktopBrowserAgentRequest): Promise<Record<string, unknown>> {
     const action = typeof request.action === 'string' ? request.action : ''
     if (!this.settings.enabled && action !== 'status') throw new Error('内置浏览器已在设置中关闭。')
@@ -966,6 +1019,7 @@ export class DesktopBrowserService extends EventEmitter {
     if (action === 'type') return await this.typeText(tab, request)
     if (action === 'scroll') return await this.scroll(tab, request)
     if (action === 'screenshot') return await this.screenshot(tab, request)
+    if (action === 'element-screenshot') return await this.elementScreenshot(tab, request)
     if (action === 'viewport') return await this.setViewport(tab, request)
     if (action === 'visibility') {
       if (typeof request.visible !== 'boolean') throw new Error('visible 是必填布尔值。')
@@ -1356,7 +1410,7 @@ export class DesktopBrowserService extends EventEmitter {
       show: false,
       frame: false,
       backgroundColor: this.theme === 'dark' ? '#101114' : '#f5f6f8',
-      title: 'DeepSeek Harness 浏览器',
+      title: 'DFY DSH Desktop 浏览器',
       icon: app.isPackaged
         ? join(process.resourcesPath, 'app-icon.png')
         : join(app.getAppPath(), 'app-icon.png'),
@@ -2199,7 +2253,7 @@ export class DesktopBrowserService extends EventEmitter {
       };
       const candidates = [...document.querySelectorAll('a[href],button,input,textarea,select,summary,label,h1,h2,h3,h4,h5,h6,[role],[data-testid],[aria-label],[contenteditable="true"],[tabindex]:not([tabindex="-1"])')]
         .filter(visible).slice(0, ${String(MAX_SNAPSHOT_ELEMENTS)});
-      const storeKey = Symbol.for('deepseek-harness.desktop-browser.snapshot-refs');
+      const storeKey = Symbol.for('dfy-dsh-desktop.browser.snapshot-refs');
       let store = globalThis[storeKey];
       if (!store || !(store.refs instanceof WeakMap) || !Number.isSafeInteger(store.next)) {
         store = { refs: new WeakMap(), next: 1 };
@@ -2299,6 +2353,8 @@ export class DesktopBrowserService extends EventEmitter {
       tab.snapshotTargets.set(element.ref, {
         x: element.x + Math.max(1, element.width) / 2,
         y: element.y + Math.max(1, element.height) / 2,
+        width: Math.max(1, element.width),
+        height: Math.max(1, element.height),
       })
       const role = element.role || element.tag
       const type = element.type ? ` type="${element.type}"` : ''
@@ -2840,13 +2896,16 @@ export class DesktopBrowserService extends EventEmitter {
     const supported = new Set([
       'count', 'click', 'fill', 'type', 'press', 'select-option', 'inner-text', 'text-content',
       'get-attribute', 'is-visible', 'is-enabled', 'wait-for', 'focus', 'all-text-contents', 'set-checked',
-      'evaluate', 'evaluate-all', 'download-media', 'press-sequentially',
+      'evaluate', 'evaluate-all', 'download-media', 'press-sequentially', 'screenshot',
     ])
     if (!supported.has(operation)) throw new Error(`不支持的 Locator 操作：${operation}`)
     if ((operation === 'fill' || operation === 'type' || operation === 'press-sequentially') && typeof request.value !== 'string') throw new Error('value 必须是字符串。')
     if (operation === 'press' && (typeof request.key !== 'string' || request.key.length === 0)) throw new Error('key 必须是非空字符串。')
     if (operation === 'set-checked' && typeof request.checked !== 'boolean') throw new Error('checked 必须是布尔值。')
     const plan = parseLocatorPlan(request)
+    if (operation === 'screenshot' && plan.some((step) => step.kind === 'frame')) {
+      throw new Error('暂不支持跨 frame 的 Locator 元素截图。')
+    }
     if (operation === 'wait-for') return await this.waitForLocator(tab, plan, request)
     const actionable = new Set(['click', 'fill', 'type', 'press', 'press-sequentially', 'select-option', 'focus', 'set-checked', 'download-media'])
     const work = actionable.has(operation)
@@ -2870,6 +2929,14 @@ export class DesktopBrowserService extends EventEmitter {
     if (operation === 'text-content') return { ok: true, tabId: tab.id, operation, value: match.textContent }
     if (operation === 'get-attribute') return { ok: true, tabId: tab.id, operation, value: match.attribute ?? null }
     if (!match.visible) throw new Error('Locator 匹配的元素当前不可见。')
+    if (operation === 'screenshot') {
+      return await this.captureScreenshot(tab, 'element', {
+        x: match.x - match.width / 2,
+        y: match.y - match.height / 2,
+        width: match.width,
+        height: match.height,
+      })
+    }
     if (!match.enabled) throw new Error('Locator 匹配的元素当前不可用。')
     if (resolution.domAction === operation || (operation === 'press-sequentially' && resolution.domAction === 'type')) {
       this.invalidateTabSnapshot(tab)
@@ -3050,7 +3117,7 @@ export class DesktopBrowserService extends EventEmitter {
     const values = [...new Set(request.values as string[])]
     const response = await this.debuggerCommandFor(tab, 'Runtime.evaluate', {
       expression: `(() => {
-        const store = globalThis[Symbol.for('deepseek-harness.desktop-browser.snapshot-refs')];
+        const store = globalThis[Symbol.for('dfy-dsh-desktop.browser.snapshot-refs')];
         if (!store || !(store.refs instanceof WeakMap)) return { error: 'stale' };
         const ref = ${String(request.ref)};
         const requested = ${JSON.stringify(values)};
@@ -3320,43 +3387,208 @@ export class DesktopBrowserService extends EventEmitter {
     return { ok: true, tabId: tab.id, deltaX, deltaY }
   }
 
-  private async screenshot(tab: BrowserTabRuntime, request: DesktopBrowserAgentRequest): Promise<Record<string, unknown>> {
-    if (request.fullPage !== undefined && typeof request.fullPage !== 'boolean') throw new Error('fullPage 必须是布尔值。')
-    if (request.fullPage === true && request.clip !== undefined) throw new Error('fullPage 与 clip 不能同时使用。')
-    let clip: { x: number; y: number; width: number; height: number; scale: number } | undefined
-    if (request.clip !== undefined) {
-      if (request.clip === null || typeof request.clip !== 'object' || Array.isArray(request.clip)) throw new Error('clip 格式无效。')
-      const source = request.clip as Record<string, unknown>
-      const x = finiteCoordinate(source.x, 'clip.x')
-      const y = finiteCoordinate(source.y, 'clip.y')
-      const width = finiteCoordinate(source.width, 'clip.width')
-      const height = finiteCoordinate(source.height, 'clip.height')
-      if (width <= 0 || height <= 0 || width > 16_384 || height > 16_384) throw new Error('clip 尺寸必须大于 0 且不超过 16384。')
-      clip = { x, y, width, height, scale: 1 }
-    } else if (request.fullPage === true) {
-      const metrics = await this.debuggerCommandFor(tab, 'Page.getLayoutMetrics') as { cssContentSize?: { x?: unknown; y?: unknown; width?: unknown; height?: unknown }; contentSize?: { x?: unknown; y?: unknown; width?: unknown; height?: unknown } }
-      const size = metrics.cssContentSize ?? metrics.contentSize
-      if (size !== undefined && [size.x, size.y, size.width, size.height].every((value) => typeof value === 'number' && Number.isFinite(value))) {
-        clip = {
-          x: size.x as number,
-          y: size.y as number,
-          width: Math.min(16_384, Math.max(1, size.width as number)),
-          height: Math.min(16_384, Math.max(1, size.height as number)),
-          scale: 1,
-        }
+  private parseScreenshotRect(value: unknown, name: string): CssScreenshotRect {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${name} 格式无效。`)
+    const source = value as Record<string, unknown>
+    const rect = {
+      x: finiteCoordinate(source.x, `${name}.x`),
+      y: finiteCoordinate(source.y, `${name}.y`),
+      width: finiteCoordinate(source.width, `${name}.width`),
+      height: finiteCoordinate(source.height, `${name}.height`),
+    }
+    if (rect.width <= 0 || rect.height <= 0) throw new Error(`${name} 的 width 和 height 必须大于 0。`)
+    return rect
+  }
+
+  private async screenshotViewportMetrics(tab: BrowserTabRuntime): Promise<{
+    width: number
+    height: number
+    scrollX: number
+    scrollY: number
+  }> {
+    const metrics = await this.debuggerCommandFor(tab, 'Page.getLayoutMetrics') as {
+      cssVisualViewport?: { pageX?: unknown; pageY?: unknown; clientWidth?: unknown; clientHeight?: unknown }
+      cssLayoutViewport?: { pageX?: unknown; pageY?: unknown; clientWidth?: unknown; clientHeight?: unknown }
+    }
+    const viewport = metrics.cssVisualViewport ?? metrics.cssLayoutViewport
+    if (viewport !== undefined
+      && typeof viewport.clientWidth === 'number' && Number.isFinite(viewport.clientWidth) && viewport.clientWidth > 0
+      && typeof viewport.clientHeight === 'number' && Number.isFinite(viewport.clientHeight) && viewport.clientHeight > 0) {
+      return {
+        width: viewport.clientWidth,
+        height: viewport.clientHeight,
+        scrollX: typeof viewport.pageX === 'number' && Number.isFinite(viewport.pageX) ? viewport.pageX : 0,
+        scrollY: typeof viewport.pageY === 'number' && Number.isFinite(viewport.pageY) ? viewport.pageY : 0,
       }
     }
-    const response = await this.debuggerCommandFor(tab, 'Page.captureScreenshot', {
-      format: 'png',
-      fromSurface: true,
-      captureBeyondViewport: request.fullPage === true || clip !== undefined,
-      ...(clip === undefined ? {} : { clip }),
-    }) as { data?: unknown }
-    if (typeof response.data !== 'string' || response.data.length === 0) throw new Error('网页截图失败。')
-    await mkdir(this.screenshotsPath, { recursive: true })
-    const path = join(this.screenshotsPath, `browser-${new Date().toISOString().replaceAll(/[:.]/gu, '-')}.png`)
-    await writeFile(path, Buffer.from(response.data, 'base64'))
-    return { ok: true, tabId: tab.id, path, url: tab.url, fullPage: request.fullPage === true, ...(clip === undefined ? {} : { clip }) }
+    const response = await this.debuggerCommandFor(tab, 'Runtime.evaluate', {
+      expression: '({ width: innerWidth, height: innerHeight, scrollX, scrollY })',
+      returnByValue: true,
+    }) as { result?: { value?: { width?: unknown; height?: unknown; scrollX?: unknown; scrollY?: unknown } } }
+    const value = response.result?.value
+    if (typeof value?.width !== 'number' || !Number.isFinite(value.width) || value.width <= 0
+      || typeof value.height !== 'number' || !Number.isFinite(value.height) || value.height <= 0) {
+      throw new Error('无法读取当前网页视口尺寸。')
+    }
+    return {
+      width: value.width,
+      height: value.height,
+      scrollX: typeof value.scrollX === 'number' && Number.isFinite(value.scrollX) ? value.scrollX : 0,
+      scrollY: typeof value.scrollY === 'number' && Number.isFinite(value.scrollY) ? value.scrollY : 0,
+    }
+  }
+
+  private async captureScreenshot(
+    tab: BrowserTabRuntime,
+    kind: 'viewport' | 'rect' | 'element',
+    requestedRect?: CssScreenshotRect,
+  ): Promise<Record<string, unknown>> {
+    const viewport = await this.screenshotViewportMetrics(tab)
+    const capture = await this.capturePageImage(tab).catch((error: unknown) => {
+      throw new Error(`网页截图失败（capturePage）：${error instanceof Error ? error.message : String(error)}`)
+    })
+    let png: Buffer
+    let size: Electron.Size
+    let rect: CssScreenshotRect | undefined
+    try {
+      const captured = capture.image
+      if (captured.isEmpty()) throw new Error('网页截图失败：当前视口没有可捕获的图像。')
+      let image = captured
+      if (requestedRect !== undefined) {
+        const capturedSize = captured.getSize()
+        const plan = cssRectToImageCrop(requestedRect, viewport, capturedSize)
+        image = captured.crop({
+          x: plan.crop.x,
+          y: plan.crop.y,
+          width: plan.crop.width,
+          height: plan.crop.height,
+        })
+        rect = plan.rect
+      }
+      if (image.isEmpty()) throw new Error('网页截图失败：裁剪后的区域为空。')
+      size = image.getSize()
+      if (size.width <= 0 || size.height <= 0
+        || size.width > MAX_BROWSER_SCREENSHOT_EDGE || size.height > MAX_BROWSER_SCREENSHOT_EDGE
+        || size.width * size.height > MAX_BROWSER_SCREENSHOT_PIXELS) {
+        throw new Error(`网页截图尺寸超过限制：${String(size.width)}×${String(size.height)}。`)
+      }
+      // Encode exactly once while the temporary compositor host is alive. The
+      // resulting Buffer survives host teardown and is shared by cache + registry.
+      try {
+        png = image.toPNG()
+      } catch (error) {
+        throw new Error(`网页截图失败（toPNG）：${error instanceof Error ? error.message : String(error)}`)
+      }
+    } finally {
+      capture.release()
+    }
+    const result = await this.screenshotStore.save(png, {
+      width: size.width,
+      height: size.height,
+      sourceUrl: tab.view.webContents.getURL() || tab.url,
+      capturedAt: new Date().toISOString(),
+      kind,
+      ...(rect === undefined ? {} : { rect }),
+      scrollX: viewport.scrollX,
+      scrollY: viewport.scrollY,
+    })
+    return { ok: true, tabId: tab.id, url: result.sourceUrl, ...result }
+  }
+
+  private async capturePageImage(tab: BrowserTabRuntime): Promise<{ image: NativeImage; release: () => void }> {
+    const view = tab.view
+    if (view.getVisible()) return { image: await view.webContents.capturePage(), release: () => {} }
+    const originalHost = tab.hostWindow
+    if (originalHost === undefined || originalHost.isDestroyed()) throw new Error('网页截图失败：标签页没有可用的宿主窗口。')
+    const originalBounds = view.getBounds()
+    const originalVisible = view.getVisible()
+    const captureBounds = {
+      x: 0,
+      y: 0,
+      width: Math.max(1, originalBounds.width),
+      height: Math.max(1, originalBounds.height),
+    }
+    const captureWindow = new BrowserWindow(browserScreenshotCaptureWindowOptions(captureBounds))
+    let released = false
+    const release = (): void => {
+      if (released) return
+      released = true
+      view.setVisible(false)
+      if (!captureWindow.isDestroyed()) captureWindow.hide()
+      try { captureWindow.contentView.removeChildView(view) } catch {}
+      if (!originalHost.isDestroyed() && !view.webContents.isDestroyed()) {
+        originalHost.contentView.addChildView(view)
+        tab.hostWindow = originalHost
+        view.setBounds(originalBounds)
+        view.setVisible(originalVisible)
+      }
+      if (!captureWindow.isDestroyed()) captureWindow.destroy()
+    }
+    try {
+      originalHost.contentView.removeChildView(view)
+      captureWindow.contentView.addChildView(view)
+      tab.hostWindow = captureWindow
+      view.setBounds(captureBounds)
+      view.setVisible(true)
+      // A genuinely hidden BrowserWindow has no active compositor surface on
+      // macOS. Keep this host fully transparent and outside practical displays,
+      // then show it without focus so Electron can paint the WebContentsView
+      // without flashing the captured page in the native window layer.
+      captureWindow.showInactive()
+      await new Promise<void>((resolve) => setTimeout(resolve, 100))
+      let timer: NodeJS.Timeout | undefined
+      try {
+        const image = await Promise.race([
+          view.webContents.capturePage(),
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(() => reject(new Error('网页截图失败：等待 Electron 捕获超时。')), 10_000)
+          }),
+        ])
+        return { image, release }
+      } finally {
+        if (timer !== undefined) clearTimeout(timer)
+      }
+    } catch (error) {
+      release()
+      throw error
+    }
+  }
+
+  private async screenshot(tab: BrowserTabRuntime, request: DesktopBrowserAgentRequest): Promise<Record<string, unknown>> {
+    if (request.fullPage !== undefined && typeof request.fullPage !== 'boolean') throw new Error('fullPage 必须是布尔值。')
+    if (request.fullPage === true) throw new Error('内置浏览器截图仅支持当前视口；请使用 rect 截取当前视口内的局部区域。')
+    if (request.rect !== undefined && request.clip !== undefined) throw new Error('rect 与兼容参数 clip 不能同时使用。')
+    if (request.ref !== undefined && (request.rect !== undefined || request.clip !== undefined)) throw new Error('ref 与 rect/clip 不能同时使用。')
+    if (request.ref !== undefined) {
+      const target = targetFromRequest(tab, request)
+      if (target.width === undefined || target.height === undefined) throw new Error('元素引用缺少区域信息，请重新获取 DOM 快照。')
+      return await this.captureScreenshot(tab, 'element', {
+        x: target.x - target.width / 2,
+        y: target.y - target.height / 2,
+        width: target.width,
+        height: target.height,
+      })
+    }
+    const rawRect = request.rect ?? request.clip
+    if (rawRect !== undefined) return await this.captureScreenshot(tab, 'rect', this.parseScreenshotRect(rawRect, request.rect === undefined ? 'clip' : 'rect'))
+    return await this.captureScreenshot(tab, 'viewport')
+  }
+
+  private async elementScreenshot(tab: BrowserTabRuntime, request: DesktopBrowserAgentRequest): Promise<Record<string, unknown>> {
+    if (request.ref !== undefined) return await this.screenshot(tab, request)
+    const target = targetFromRequest(tab, request)
+    const response = await this.debuggerCommandFor(tab, 'Runtime.evaluate', {
+      expression: `(() => {
+        const element = document.elementFromPoint(${JSON.stringify(target.x)}, ${JSON.stringify(target.y)});
+        if (!(element instanceof Element)) return null;
+        const rect = element.getBoundingClientRect();
+        return { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
+      })()`,
+      returnByValue: true,
+    }) as { result?: { value?: unknown } }
+    const value = response.result?.value
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('指定坐标处没有可截图的元素。')
+    return await this.captureScreenshot(tab, 'element', this.parseScreenshotRect(value, 'element'))
   }
 
   private async setViewport(tab: BrowserTabRuntime, request: DesktopBrowserAgentRequest): Promise<Record<string, unknown>> {

@@ -10,6 +10,8 @@ window.__ModuleLoader__.load({
     const SETTINGS_PATH = "/api/dsh-desktop/browser/settings";
     const HISTORY_PATH = "/api/dsh-desktop/browser/history";
     const CLEAR_DATA_PATH = "/api/dsh-desktop/browser/clear-data";
+    const SCREENSHOTS_PATH = "/api/dsh-desktop/browser/screenshots";
+    const REVEAL_SCREENSHOTS_PATH = "/api/dsh-desktop/browser/screenshots/reveal";
     const STYLE_ID = "dsh-desktop-browser-settings-styles";
     const DEFAULT_SETTINGS = Object.freeze({ enabled: true, agentOpenMode: "background", displayMode: "split" });
 
@@ -205,8 +207,8 @@ window.__ModuleLoader__.load({
         setSaving(true);
         setError("");
         try {
-          await request(kind === "history" ? HISTORY_PATH : CLEAR_DATA_PATH, {
-            method: kind === "history" ? "DELETE" : "POST"
+          await request(kind === "history" ? HISTORY_PATH : kind === "screenshots" ? SCREENSHOTS_PATH : CLEAR_DATA_PATH, {
+            method: kind === "history" || kind === "screenshots" ? "DELETE" : "POST"
           });
           setConfirmAction("");
         } catch (cause) {
@@ -216,6 +218,18 @@ window.__ModuleLoader__.load({
         }
       }, [confirmAction]);
 
+      const revealScreenshots = React.useCallback(async () => {
+        setSaving(true);
+        setError("");
+        try {
+          await request(REVEAL_SCREENSHOTS_PATH, { method: "POST" });
+        } catch (cause) {
+          setError(cause instanceof Error ? cause.message : String(cause));
+        } finally {
+          setSaving(false);
+        }
+      }, []);
+
       const disabled = loading || saving;
       return React.createElement("section", { className: "dsh-desktop-browser-settings" },
         React.createElement("h2", null, "浏览器"),
@@ -223,7 +237,7 @@ window.__ModuleLoader__.load({
           React.createElement("div", { className: "dsh-desktop-browser-feature-icon" }, React.createElement(BrowserIcon)),
           React.createElement("div", { className: "dsh-desktop-browser-copy" },
             React.createElement("div", { className: "dsh-desktop-browser-title" }, "浏览器"),
-            React.createElement("div", { className: "dsh-desktop-browser-description" }, "让 DeepSeek Harness 控制内置浏览器")
+            React.createElement("div", { className: "dsh-desktop-browser-description" }, "让 DFY DSH Desktop 控制内置浏览器")
           ),
           React.createElement(Toggle, {
             checked: settings.enabled,
@@ -254,6 +268,21 @@ window.__ModuleLoader__.load({
             "data-confirm": String(confirmAction === "history"),
             onClick: () => void clear("history")
           }, confirmAction === "history" ? "再次点击确认" : "清除历史记录")
+        ),
+        React.createElement(SettingRow, { title: "浏览器截图与临时附件", description: "只清理浏览器生成的临时 PNG；不会删除 Cookie、登录状态、历史或正式对话附件" },
+          React.createElement("button", {
+            className: "dsh-desktop-browser-action",
+            type: "button",
+            disabled,
+            onClick: () => void revealScreenshots()
+          }, "在 Finder 中显示"),
+          React.createElement("button", {
+            className: "dsh-desktop-browser-action",
+            type: "button",
+            disabled,
+            "data-confirm": String(confirmAction === "screenshots"),
+            onClick: () => void clear("screenshots")
+          }, confirmAction === "screenshots" ? "再次点击确认" : "清理临时截图")
         ),
         React.createElement(SettingRow, { title: "网站数据", description: "清除缓存、Cookie、站点存储和登录状态" },
           React.createElement("button", {

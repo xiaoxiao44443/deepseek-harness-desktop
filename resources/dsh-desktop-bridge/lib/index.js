@@ -10,13 +10,13 @@ const PROFILE_FILES = ['package.json', 'cordis.patch.yml']
 const NOTIFICATION_SETTINGS_PATH = '/api/dsh-desktop/notifications/settings'
 const NOTIFICATION_SHOW_PATH = '/api/dsh-desktop/notifications/show'
 const MAX_PROXY_BODY_BYTES = 16_384
-export const STATIC_GUIDANCE = `DeepSeek Harness is running inside DeepSeek Harness Desktop. The tool schemas attached to the current model request are the authoritative callable set for this same turn. If the user names a tool that is present in that set, call it directly now: do not inspect the registry first, execute its implementation through a shell, import its source, simulate it, or claim it will only be callable on a later turn. After a Harness restart, the first resumed user turn already receives the rebuilt callable set. The desktop's optional Patch configuration is equivalent to adding \`dsh web --patch <file>\`: it overlays the normal web Profile after its bundle and user layers, and takes effect after Harness restarts. A Patch is useful for local plugin development, entry enable/disable, and configuration experiments, but it is not a separate debug runtime and does not install dependencies; any package or file inserted by the Patch must already be resolvable. For durable profile plugins, use \`dsh plugin --profile web add <package>\` with a package that declares a dsh bundle. The desktop also provides the ${RESTART_TOOL_NAME} tool. Only when a requested tool is absent because a Profile plugin was installed, removed, or changed after this Harness process started, verify the current tool catalog at most once, then use ${RESTART_TOOL_NAME} instead of creating a temporary duplicate or executing the missing tool indirectly. The restart requires user approval and ends the current turn.`
-const STALE_CONTEXT = `DeepSeek Harness Desktop detected that the active web Profile changed after this Harness process started. Newly installed or changed tools are not mounted in the current process. Use ${RESTART_TOOL_NAME} when the user wants those changes loaded.`
+export const STATIC_GUIDANCE = `DeepSeek Harness is running inside DFY DSH Desktop. The tool schemas attached to the current model request are the authoritative callable set for this same turn. If the user names a tool that is present in that set, call it directly now: do not inspect the registry first, execute its implementation through a shell, import its source, simulate it, or claim it will only be callable on a later turn. After a Harness restart, the first resumed user turn already receives the rebuilt callable set. The desktop's optional Patch configuration is equivalent to adding \`dsh web --patch <file>\`: it overlays the normal web Profile after its bundle and user layers, and takes effect after Harness restarts. A Patch is useful for local plugin development, entry enable/disable, and configuration experiments, but it is not a separate debug runtime and does not install dependencies; any package or file inserted by the Patch must already be resolvable. For durable profile plugins, use \`dsh plugin --profile web add <package>\` with a package that declares a dsh bundle. The desktop also provides the ${RESTART_TOOL_NAME} tool. Only when a requested tool is absent because a Profile plugin was installed, removed, or changed after this Harness process started, verify the current tool catalog at most once, then use ${RESTART_TOOL_NAME} instead of creating a temporary duplicate or executing the missing tool indirectly. The restart requires user approval and ends the current turn.`
+const STALE_CONTEXT = `DFY DSH Desktop detected that the active web Profile changed after this Harness process started. Newly installed or changed tools are not mounted in the current process. Use ${RESTART_TOOL_NAME} when the user wants those changes loaded.`
 
 export function createRestartTool(controlUrl, controlToken, fetchImpl = fetch) {
   return {
     name: RESTART_TOOL_NAME,
-    description: 'Request a user-approved restart of the Harness background process so newly installed or changed Profile plugins and tools are loaded. DeepSeek Harness Desktop reconnects the current interface after restart.',
+    description: 'Request a user-approved restart of the Harness background process so newly installed or changed Profile plugins and tools are loaded. DFY DSH Desktop reconnects the current interface after restart.',
     parameters: {
       type: 'object',
       properties: {
@@ -63,7 +63,7 @@ export async function apply(ctx, overrides = {}) {
   const controlToken = overrides.controlToken ?? process.env.DSH_DESKTOP_CONTROL_TOKEN
   const profilePath = overrides.profilePath ?? process.env.DSH_DESKTOP_PROFILE_PATH
   if (!controlUrl || !controlToken || !profilePath) {
-    throw new Error('dsh-desktop-bridge requires the DeepSeek Harness Desktop environment')
+    throw new Error('dsh-desktop-bridge requires the DFY DSH Desktop environment')
   }
 
   ctx.tools.register(createRestartTool(controlUrl, controlToken))

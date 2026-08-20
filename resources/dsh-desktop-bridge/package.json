@@ -1,7 +1,7 @@
 {
   "name": "dsh-desktop-bridge",
   "version": "0.1.0",
-  "description": "DeepSeek Harness Desktop host integration bridge",
+  "description": "DFY DSH Desktop host integration bridge",
   "type": "module",
   "main": "./lib/index.js",
   "exports": {

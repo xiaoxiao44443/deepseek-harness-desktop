@@ -1,4 +1,4 @@
-# DeepSeek Harness Desktop
+# DFY DSH Desktop
 
 DeepSeek Harness 的轻量 Electron 桌面壳。Harness 仍是完整、未修改的官方 Web UI；桌面端只增加原生窗口、自定义标题栏、进程托管和独立的 Harness 运行时更新。
 
@@ -6,12 +6,12 @@ DeepSeek Harness 的轻量 Electron 桌面壳。Harness 仍是完整、未修改
 
 - Electron 主进程只负责窗口、更新和 Harness 子进程，不承载 Agent 业务。
 - Harness 使用 Electron 内置 Node 24 以独立进程运行：`dsh web --port 0`。
-- 发布包把 Harness 与 npm 更新器作为独立运行时分发，不依赖 `app.asar` 的依赖裁剪结果。桌面壳会先显示启动窗口，再准备运行时；macOS 直接从 App Resources 使用运行时，避免首次启动解压数万个文件；Windows 在窗口内提示并完成首次原子解包，后续直接复用。
+- 发布包把 Harness 与 pnpm 更新器作为独立运行时分发，不依赖 `app.asar` 的依赖裁剪结果。桌面壳会先显示启动窗口，再准备运行时；macOS 直接从 App Resources 使用运行时，避免首次启动解压数万个文件；Windows 在窗口内提示并完成首次原子解包，后续直接复用。
 - 页面仅绑定 `127.0.0.1` 的随机端口，并嵌入沙箱化 iframe；主壳与 Harness DOM 隔离，Harness 不获得 Electron IPC。
 - 桌面壳 renderer 使用 React 19 + TypeScript + Vite，开发模式支持 HMR；Harness 页面和进程生命周期仍由 Electron 主进程独立托管。
 - 桌面端不覆盖 `DSH_HOME`：Harness 遵循官方解析顺序（显式配置、`$DSH_HOME`、`~/.dsh`）。因此外部 dsh 与桌面端自然共享配置、会话、Profile、凭据和扩展；项目工作区仍由 Harness 自己管理。
-- 桌面壳自己的 Chromium 状态、运行时、更新缓存和开发设置统一位于 `~/.saltfish/deepseek-harness-desktop`，Windows、macOS 与 Linux 使用同一目录约定。
-- Harness 核心安装在版本化目录。新版本先进入 staging，npm 完整性校验和 `dsh --version` 验证通过后才标记待更新；下次启动先试运行新版本，健康检查失败会自动回退。
+- 桌面壳自己的 Chromium 状态、运行时、更新缓存和开发设置统一位于 `~/.saltfish/dfy-dsh-desktop`，Windows、macOS 与 Linux 使用同一目录约定。首次启动会自动迁移旧版 `~/.saltfish/deepseek-harness-desktop`。
+- Harness 核心安装在版本化目录。新版本先由 pnpm 安装到 staging，完成构建脚本白名单校验和 `dsh --version` 验证后才标记待更新；下次启动先试运行新版本，健康检查失败会自动回退。
 - 桌面端为每个受管 Harness 运行时生成同源的 `dsh`、`pnpm` 和 `node` 启动器，并把它们注入 Harness 进程的 `PATH`。因此标题菜单里的开发操作、Harness 自己的终端和 Agent 启动的子进程使用的是同一套版本，不会出现“壳能用、dsh 自己不能用”的分叉。
 - 桌面端通过内置 Host + Client 插件 `dsh-desktop-bridge` 提供受审批的 `desktop_restart_harness` 工具、回复/权限/提问系统通知，并监测当前 Web Profile 是否在进程启动后发生变化。模型可以请求由 Electron 主进程安全重启 Harness，从而加载新安装的插件；桥接层使用桌面私有 `--patch` 和专用模块解析器注入，不会改写用户共享的 `~/.dsh/profiles/web`。
 
@@ -45,7 +45,7 @@ pnpm package:win
 
 仓库提供 `.github/workflows/build-windows.yml`，可在 GitHub Actions 中手动构建 Windows x64 NSIS 安装包；推送 `v*` 标签时也会自动构建。当前产物未签名，适合测试，首次运行可能触发 Windows SmartScreen 提示。
 
-Windows 卸载程序会询问是否一并删除 `~/.saltfish/deepseek-harness-desktop`。该选项默认关闭；无论如何都不会删除官方 Harness 共用的 `~/.dsh`。
+Windows 卸载程序会询问是否一并删除 `~/.saltfish/dfy-dsh-desktop`。该选项默认关闭；无论如何都不会删除官方 Harness 共用的 `~/.dsh`。
 
 构建 macOS Intel 安装包（最低 macOS 12）：
 
@@ -55,7 +55,7 @@ pnpm package:mac:intel
 
 Harness 运行时包含平台相关的原生依赖，因此 `prepare:runtime` 必须在目标平台和架构上执行，Windows 生成的 `harness-runtime.tgz` 不能用于 macOS。仓库提供 `.github/workflows/build-macos-intel.yml`，可以在 GitHub Actions 的 Intel macOS Runner 上手动构建 DMG 和 ZIP。当前产物未签名，适合测试；公开分发前还需要接入 Developer ID 签名和 Apple 公证。
 
-macOS 使用原生红黄绿窗口按钮，并直接从 App Resources 启动随包运行时，不需要在首次启动时解压。桌面壳自己的状态仍位于 `~/.saltfish/deepseek-harness-desktop`，Harness 官方数据仍位于 `~/.dsh`。
+macOS 使用原生红黄绿窗口按钮，并直接从 App Resources 启动随包运行时，不需要在首次启动时解压。桌面壳自己的状态仍位于 `~/.saltfish/dfy-dsh-desktop`，Harness 官方数据仍位于 `~/.dsh`。
 
 ## Harness 开发能力
 

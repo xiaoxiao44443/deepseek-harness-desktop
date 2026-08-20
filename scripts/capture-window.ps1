@@ -12,10 +12,10 @@ public static class DesktopWindowCapture {
 '@
 Add-Type -AssemblyName System.Drawing
 
-$process = Get-Process -Name 'DeepSeek Harness' -ErrorAction Stop |
+$process = Get-Process -Name 'DFY DSH Desktop' -ErrorAction Stop |
     Where-Object { $_.MainWindowHandle -ne 0 } |
     Select-Object -First 1
-if ($null -eq $process) { throw 'DeepSeek Harness main window not found' }
+if ($null -eq $process) { throw 'DFY DSH Desktop main window not found' }
 
 $handle = $process.MainWindowHandle
 [DesktopWindowCapture]::ShowWindow($handle, 9) | Out-Null

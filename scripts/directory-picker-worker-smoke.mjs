@@ -21,7 +21,7 @@ const workerArgs = process.env.DSH_PICKER_DIRECT === '1' ? [worker] : [shim, wor
 const child = spawn(electron, workerArgs, {
   env: {
     ...process.env,
-    DSH_DIALOG_TITLE: 'DeepSeek Harness Directory Picker Smoke',
+    DSH_DIALOG_TITLE: 'DFY DSH Desktop Directory Picker Smoke',
     ELECTRON_RUN_AS_NODE: '1',
     ELECTRON_NO_ATTACH_CONSOLE: '1',
   },

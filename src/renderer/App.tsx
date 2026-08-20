@@ -895,7 +895,7 @@ export function App(): ReactNode {
           event.currentTarget.blur()
           setMenuOpen((open) => !open)
         }}>
-          <span className="brand-mark-shell" aria-hidden="true"><img className="brand-mark" src={titlebarIconUrl} alt="" draggable="false" /></span><span>DeepSeek Harness</span><ChevronDown className="menu-chevron" aria-hidden="true" />
+          <span className="brand-mark-shell" aria-hidden="true"><img className="brand-mark" src={titlebarIconUrl} alt="" draggable="false" /></span><span>DFY DSH Desktop</span><ChevronDown className="menu-chevron" aria-hidden="true" />
         </button>
         <div className="drag-region" aria-hidden="true" />
         {state?.browser.settings.enabled ? (
@@ -911,7 +911,7 @@ export function App(): ReactNode {
       </header>
 
       {menuOpen && state !== undefined && update !== undefined ? (
-        <section id="title-menu-popover" className={`menu-card${shellMenuPresentationPending ? ' shell-overlay-pending' : ''}${browserShellOverlayActive ? ' shell-overlay-synchronized' : ''}`} role="menu" aria-label="DeepSeek Harness 应用菜单">
+        <section id="title-menu-popover" className={`menu-card${shellMenuPresentationPending ? ' shell-overlay-pending' : ''}${browserShellOverlayActive ? ' shell-overlay-synchronized' : ''}`} role="menu" aria-label="DFY DSH Desktop 应用菜单">
           <div className="menu-list">
             <button id="development-action" className="menu-item" type="button" role="menuitem" onClick={(event) => { event.currentTarget.blur(); setMenuOpen(false); setDevelopmentOpen(true) }}><span className="item-label">开发工具</span><span className="item-meta">{patchEnabled ? 'Patch 已启用' : 'Patch 与 Plugin'}</span><span className="item-dot" aria-hidden="true" /></button>
             <button id="update-action" className="menu-item" type="button" role="menuitem" disabled={update.disabled} onClick={(event) => { event.currentTarget.blur(); void runMenuAction('update') }}><span id="update-title" className="item-label">{update.title}</span><span className="item-meta">{update.detail}</span><span className={update.dotClass} aria-hidden="true" /></button>
@@ -932,7 +932,7 @@ export function App(): ReactNode {
 
       <Modal open={releaseNotesOpen} labelledBy="release-notes-title" closeLabel="关闭版本说明" onClose={() => { setReleaseNotesOpen(false); requestAnimationFrame(focusHarness) }}>
         <header className="dialog-header">
-          <div className="dialog-heading"><img className="dialog-icon" src={appIconUrl} alt="" aria-hidden="true" draggable="false" /><div><h2 id="release-notes-title">版本说明</h2><p>DeepSeek Harness Desktop</p></div></div>
+          <div className="dialog-heading"><img className="dialog-icon" src={appIconUrl} alt="" aria-hidden="true" draggable="false" /><div><h2 id="release-notes-title">版本说明</h2><p>DFY DSH Desktop</p></div></div>
           <button ref={releaseCloseButton} className="dialog-close" type="button" aria-label="关闭版本说明" title="关闭" onClick={() => setReleaseNotesOpen(false)}><X /></button>
         </header>
         <div className="dialog-content">

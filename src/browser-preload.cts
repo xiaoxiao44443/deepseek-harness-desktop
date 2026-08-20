@@ -27,8 +27,8 @@ function installPointer(): HTMLElement | undefined {
   host.style.setProperty('position', 'fixed', 'important')
   host.style.setProperty('left', '0', 'important')
   host.style.setProperty('top', '0', 'important')
-  host.style.setProperty('width', '20px', 'important')
-  host.style.setProperty('height', '25px', 'important')
+  host.style.setProperty('width', '16px', 'important')
+  host.style.setProperty('height', '16px', 'important')
   host.style.setProperty('z-index', '2147483647', 'important')
   host.style.setProperty('pointer-events', 'none', 'important')
   host.style.setProperty('overflow', 'visible', 'important')
@@ -38,15 +38,17 @@ function installPointer(): HTMLElement | undefined {
   const shadow = host.attachShadow({ mode: 'closed' })
   const style = document.createElement('style')
   style.textContent = `
-    :host{--pointer-fill:#11161d;--pointer-stroke:rgba(255,255,255,.94);--pointer-glow:rgba(52,181,255,.95);--pointer-glow-soft:rgba(44,139,255,.56)}
-    :host([data-theme="dark"]){--pointer-fill:#f5f7fb;--pointer-stroke:rgba(7,11,17,.9);--pointer-glow:rgba(75,183,255,.92);--pointer-glow-soft:rgba(48,137,255,.58)}
-    .pointer{width:20px;height:25px;color:var(--pointer-fill);filter:drop-shadow(0 0 2px var(--pointer-glow)) drop-shadow(0 0 6px var(--pointer-glow-soft));transform-origin:2.8px 2.1px;transition:transform 90ms ease,filter 90ms ease}
-    .pointer.pressed{transform:scale(.82);filter:drop-shadow(0 0 3px var(--pointer-glow)) drop-shadow(0 0 10px var(--pointer-glow-soft)) brightness(1.08)}
-    @media(prefers-color-scheme:dark){:host(:not([data-theme="light"])){--pointer-fill:#f5f7fb;--pointer-stroke:rgba(7,11,17,.9);--pointer-glow:rgba(75,183,255,.92);--pointer-glow-soft:rgba(48,137,255,.58)}}
+    :host{--pointer-fill:#05070a;--pointer-stroke:rgba(255,255,255,.94);--pointer-glow:rgba(52,181,255,.95);--pointer-glow-soft:rgba(44,139,255,.56)}
+    :host([data-theme="dark"]){--pointer-fill:#05070a;--pointer-stroke:rgba(255,255,255,.94);--pointer-glow:rgba(75,183,255,.92);--pointer-glow-soft:rgba(48,137,255,.58)}
+    .pointer{width:16px;height:16px;color:var(--pointer-fill);transform-origin:2.2px 2.2px;transition:transform 90ms ease}
+    .pointer .halo{opacity:.44;filter:drop-shadow(0 0 1px var(--pointer-glow)) drop-shadow(0 0 2px var(--pointer-glow-soft));transition:opacity 90ms ease,filter 90ms ease}
+    .pointer.pressed{transform:scale(.82)}
+    .pointer.pressed .halo{opacity:.72;filter:drop-shadow(0 0 1.5px var(--pointer-glow)) drop-shadow(0 0 3px var(--pointer-glow-soft))}
+    @media(prefers-color-scheme:dark){:host(:not([data-theme="light"])){--pointer-fill:#05070a;--pointer-stroke:rgba(255,255,255,.94);--pointer-glow:rgba(75,183,255,.92);--pointer-glow-soft:rgba(48,137,255,.58)}}
   `
   const pointer = document.createElement('div')
   pointer.className = 'pointer'
-  pointer.innerHTML = '<svg width="20" height="25" viewBox="0 0 20 25" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2.8 2.1v17.55l4.4-4.1 3.32 7.65 3.72-1.62-3.24-7.46 6.42-.17L2.8 2.1Z" fill="currentColor" stroke="var(--pointer-stroke)" stroke-width="1.2" stroke-linejoin="round"/></svg>'
+  pointer.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" shape-rendering="geometricPrecision" xmlns="http://www.w3.org/2000/svg"><path class="halo" d="M17.2607 12.4008C19.3774 11.2626 20.4357 10.6935 20.7035 10.0084C20.9359 9.41393 20.8705 8.74423 20.5276 8.20587C20.1324 7.58551 18.984 7.23176 16.6872 6.52425L8.00612 3.85014C6.06819 3.25318 5.09923 2.95471 4.45846 3.19669C3.90068 3.40733 3.46597 3.85584 3.27285 4.41993C3.051 5.06794 3.3796 6.02711 4.03681 7.94545L6.94793 16.4429C7.75632 18.8025 8.16052 19.9824 8.80519 20.3574C9.36428 20.6826 10.0461 20.7174 10.6354 20.4507C11.3149 20.1432 11.837 19.0106 12.8813 16.7454L13.6528 15.0719C13.819 14.7113 13.9021 14.531 14.0159 14.3736C14.1168 14.2338 14.2354 14.1078 14.3686 13.9984C14.5188 13.8752 14.6936 13.7812 15.0433 13.5932L17.2607 12.4008Z" fill="none" stroke="var(--pointer-glow)" stroke-width="4.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M17.2607 12.4008C19.3774 11.2626 20.4357 10.6935 20.7035 10.0084C20.9359 9.41393 20.8705 8.74423 20.5276 8.20587C20.1324 7.58551 18.984 7.23176 16.6872 6.52425L8.00612 3.85014C6.06819 3.25318 5.09923 2.95471 4.45846 3.19669C3.90068 3.40733 3.46597 3.85584 3.27285 4.41993C3.051 5.06794 3.3796 6.02711 4.03681 7.94545L6.94793 16.4429C7.75632 18.8025 8.16052 19.9824 8.80519 20.3574C9.36428 20.6826 10.0461 20.7174 10.6354 20.4507C11.3149 20.1432 11.837 19.0106 12.8813 16.7454L13.6528 15.0719C13.819 14.7113 13.9021 14.531 14.0159 14.3736C14.1168 14.2338 14.2354 14.1078 14.3686 13.9984C14.5188 13.8752 14.6936 13.7812 15.0433 13.5932L17.2607 12.4008Z" fill="currentColor" stroke="var(--pointer-stroke)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" paint-order="stroke fill"/></svg>'
   pointerBody = pointer
   shadow.append(style, pointer)
   root.appendChild(host)

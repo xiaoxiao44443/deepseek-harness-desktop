@@ -160,7 +160,7 @@ function normalizeDesktopNotificationRequest(value: unknown): DesktopNotificatio
 
 function normalizeSessionTitle(value: string | undefined): string {
   const normalized = value?.replace(/[\r\n\0]+/gu, ' ').trim().slice(0, 120)
-  return normalized === undefined || normalized.length === 0 ? 'DeepSeek Harness' : normalized
+  return normalized === undefined || normalized.length === 0 ? 'DFY DSH Desktop' : normalized
 }
 
 function normalizeNotificationPreview(value: string | undefined, fallback: string): string {

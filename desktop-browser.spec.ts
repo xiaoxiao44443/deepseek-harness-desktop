@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { normalizeBrowserAddress, normalizeBrowserSettings } from './src/main/desktop-browser.js'
+import { browserScreenshotCaptureWindowOptions, normalizeBrowserAddress, normalizeBrowserSettings } from './src/main/desktop-browser.js'
 import {
   evaluatePage,
   parseLocatorPlan,
@@ -9,6 +9,7 @@ import {
 } from './src/main/desktop-browser-automation.js'
 import type { BrowserTabRuntime } from './src/main/desktop-browser-types.js'
 import { BROWSER_CONTROL_DOCUMENTATION, BROWSER_SKILL, createBrowserTools } from './resources/dsh-desktop-browser/lib/index.js'
+import { getProcessResourceRegistry } from './resources/dsh-desktop-browser/lib/resource-core-runtime.js'
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -35,6 +36,23 @@ describe('desktop browser settings', () => {
     )
     expect(() => normalizeBrowserAddress('browser automation', false)).toThrow('完整')
     expect(() => normalizeBrowserAddress('file:///tmp/example.html', false)).toThrow('完整')
+  })
+})
+
+describe('desktop browser screenshots', () => {
+  it('uses a fully transparent compositor host for hidden-page capture', () => {
+    expect(browserScreenshotCaptureWindowOptions({ width: 1280, height: 800 })).toEqual(expect.objectContaining({
+      show: false,
+      focusable: false,
+      skipTaskbar: true,
+      hasShadow: false,
+      transparent: true,
+      opacity: 0,
+      backgroundColor: '#00000000',
+      paintWhenInitiallyHidden: true,
+      width: 1280,
+      height: 800,
+    }))
   })
 })
 
@@ -254,6 +272,10 @@ describe('desktop browser plugin', () => {
     expect(BROWSER_SKILL).toContain('browser_execute')
     expect(BROWSER_SKILL).toContain('return await browser.documentation()')
     expect(BROWSER_SKILL).toContain('exactly once')
+    expect(BROWSER_SKILL).toContain('Never swallow a failed readiness wait')
+    expect(BROWSER_SKILL).toContain('try/finally')
+    expect(BROWSER_SKILL).toContain('Treat resourceRef as an opaque token')
+    expect(BROWSER_SKILL).toContain('Do not copy a temporary screenshot into the workspace')
     expect(BROWSER_CONTROL_DOCUMENTATION).toContain('browser.tabs.new')
     expect(BROWSER_CONTROL_DOCUMENTATION).toContain('browser.tabs.finalize')
     expect(BROWSER_CONTROL_DOCUMENTATION).toContain('tab.playwright.domSnapshot')
@@ -263,6 +285,8 @@ describe('desktop browser plugin', () => {
     expect(BROWSER_CONTROL_DOCUMENTATION).toContain('waitForURL')
     expect(BROWSER_CONTROL_DOCUMENTATION).toContain('action completion only')
     expect(BROWSER_CONTROL_DOCUMENTATION).toContain('locator.waitFor() for business UI')
+    expect(BROWSER_CONTROL_DOCUMENTATION).toContain('do not copy the PNG into the workspace')
+    expect(BROWSER_CONTROL_DOCUMENTATION).toContain('never reconstruct, shorten, or rewrite it in prose')
     expect(BROWSER_CONTROL_DOCUMENTATION).not.toContain('SPA URL, title, H1, and page text have stabilized')
     expect(BROWSER_CONTROL_DOCUMENTATION).toContain('tab.cua')
     expect(BROWSER_CONTROL_DOCUMENTATION).toContain('stable element refs')
@@ -283,6 +307,109 @@ describe('desktop browser plugin', () => {
       actions: [],
     })
     expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it('returns screenshot metadata and an opaque resource ref without requiring image plugins', async () => {
+    const resourceId = 'a'.repeat(43)
+    const fetchImpl = vi.fn(async (_url: URL, options: RequestInit) => {
+      const body = JSON.parse(String(options.body))
+      return new Response(JSON.stringify(body.action === 'new'
+        ? { ok: true, tabId: 'agent-shot' }
+        : {
+            ok: true,
+            tabId: 'agent-shot',
+            resourceId,
+            path: '/tmp/browser-shot.png',
+            mimeType: 'image/png',
+            bytes: 8,
+            width: 640,
+            height: 480,
+            sourceUrl: 'https://example.com/',
+            capturedAt: '2026-08-20T00:00:00.000Z',
+          }), { status: 200, headers: { 'content-type': 'application/json' } })
+    })
+    vi.stubGlobal('fetch', fetchImpl)
+    const tool = createBrowserTools('http://127.0.0.1:12345/v1/restart-harness', 'secret')[0]
+    const output = await tool.execute({
+      code: 'const tab = await browser.tabs.new(); return await tab.screenshot();',
+    }, { agent: { id: 'session-a' } })
+    const parsed = JSON.parse(output)
+    expect(parsed.result).toEqual(expect.objectContaining({
+      path: '/tmp/browser-shot.png',
+      mimeType: 'image/png',
+      width: 640,
+      height: 480,
+      resourceRef: expect.stringMatching(/^dfyr1_/),
+    }))
+    expect(parsed.screenshotResources).toEqual([expect.objectContaining({
+      resourceRef: parsed.result.resourceRef,
+      sourceUrl: 'https://example.com/',
+    })])
+    expect(tool.output.render({}, output).map((block: { type: string }) => block.type)).toEqual(['text'])
+  })
+
+  it('projects screenshots only for explicitly image-capable parent models', async () => {
+    const resourceId = 'b'.repeat(43)
+    const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    const registry = getProcessResourceRegistry()
+    const dispose = registry.registerProvider({
+      id: 'desktop-browser',
+      async resolve(reference: { id: string }) {
+        return reference.id === resourceId
+          ? { kind: 'image', data: png, bytes: png.byteLength, mediaType: 'image/png' }
+          : undefined
+      },
+    })
+    try {
+      const fetchImpl = vi.fn(async (_url: URL, options: RequestInit) => {
+        const body = JSON.parse(String(options.body))
+        return new Response(JSON.stringify(body.action === 'new'
+          ? { ok: true, tabId: 'agent-native-shot' }
+          : {
+              ok: true,
+              tabId: 'agent-native-shot',
+              resourceId,
+              path: '/tmp/native-shot.png',
+              mimeType: 'image/png',
+              bytes: png.byteLength,
+              width: 2,
+              height: 2,
+              sourceUrl: 'https://example.com/',
+            }), { status: 200, headers: { 'content-type': 'application/json' } })
+      })
+      vi.stubGlobal('fetch', fetchImpl)
+      const attachment = {
+        attachmentId: `sha256:${'1'.repeat(64)}`,
+        mediaType: 'image/png',
+        bytes: png.byteLength,
+        width: 2,
+        height: 2,
+        name: 'native-shot.png',
+      }
+      const imageContext = {
+        llm: { resolveModelInfo: vi.fn(async () => ({ inputModalities: ['text', 'image'] })) },
+        attachments: { saveImage: vi.fn(async () => attachment) },
+      }
+      const imageTool = createBrowserTools('http://127.0.0.1:12345/v1/restart-harness', 'secret', imageContext)[0]
+      const output = await imageTool.execute({
+        code: 'const tab = await browser.tabs.new(); return await tab.screenshot();',
+      }, { agent: { id: 'session-a', options: { provider: 'test', model: 'vision' } }, signal: new AbortController().signal })
+      expect(imageContext.attachments.saveImage).toHaveBeenCalledWith(expect.objectContaining({ data: png, mediaType: 'image/png' }))
+      expect(imageTool.output.render({}, output).map((block: { type: string }) => block.type)).toEqual(['text', 'image'])
+
+      const textContext = {
+        llm: { resolveModelInfo: vi.fn(async () => ({ inputModalities: ['text'] })) },
+        attachments: { saveImage: vi.fn() },
+      }
+      const textTool = createBrowserTools('http://127.0.0.1:12345/v1/restart-harness', 'secret', textContext)[0]
+      const textOutput = await textTool.execute({
+        code: 'const tab = await browser.tabs.new(); return await tab.screenshot();',
+      }, { agent: { id: 'session-b', options: { provider: 'test', model: 'text' } }, signal: new AbortController().signal })
+      expect(textContext.attachments.saveImage).not.toHaveBeenCalled()
+      expect(textTool.output.render({}, textOutput).map((block: { type: string }) => block.type)).toEqual(['text'])
+    } finally {
+      dispose()
+    }
   })
 
   it('exposes the Codex-shaped coordinate fallback without adding model tools', async () => {

@@ -66,7 +66,7 @@ describe('HarnessToolchainManager', () => {
 
     const manager = new HarnessToolchainManager(
       join(root, 'user-data'),
-      "/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness",
+      "/Applications/DFY DSH Desktop.app/Contents/MacOS/DFY DSH Desktop",
       'darwin',
     )
     const toolchain = await manager.prepare({
@@ -83,7 +83,7 @@ describe('HarnessToolchainManager', () => {
       readFile(toolchain.nodeCommand, 'utf8'),
     ])
     expect(dsh).toMatch(/^#!\/bin\/sh/u)
-    expect(dsh).toContain("'/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness'")
+    expect(dsh).toContain("'/Applications/DFY DSH Desktop.app/Contents/MacOS/DFY DSH Desktop'")
     expect(dsh).toContain('"$@"')
     expect(pnpm).toContain(pnpmEntry)
     expect(pnpm).toContain('--config.minimum-release-age=0')

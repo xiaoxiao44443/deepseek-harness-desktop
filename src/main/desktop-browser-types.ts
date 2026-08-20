@@ -40,6 +40,8 @@ export interface BrowserSnapshot {
 export interface SnapshotTarget {
   x: number
   y: number
+  width?: number
+  height?: number
 }
 
 export type BrowserLocatorKind = 'css' | 'role' | 'text' | 'label' | 'placeholder' | 'testid' | 'nth' | 'frame' | 'filter' | 'and' | 'or'
@@ -194,6 +196,7 @@ export interface DesktopBrowserAgentRequest {
   checked?: unknown
   fullPage?: unknown
   clip?: unknown
+  rect?: unknown
   script?: unknown
   argument?: unknown
   filter?: unknown

@@ -26,7 +26,7 @@ jobs:
       - name: Download packaged applications
         uses: actions/download-artifact@v8
         with:
-          pattern: deepseek-harness-desktop-*
+          pattern: dfy-dsh-desktop-*
           path: release-assets
           merge-multiple: true
 
@@ -55,6 +55,6 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
               --generate-notes \
-              --title "DeepSeek Harness Desktop ${GITHUB_REF_NAME#v}" \
+              --title "DFY DSH Desktop ${GITHUB_REF_NAME#v}" \
               "${prerelease[@]}"
           fi

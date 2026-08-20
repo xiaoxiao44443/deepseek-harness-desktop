@@ -26,6 +26,20 @@ export interface HarnessCommandResult {
   stderr: string
 }
 
+export function buildHarnessArguments(
+  desktopBridgePatchPath: string,
+  pluginRecoveryPatchPath: string,
+  options: HarnessLaunchOptions = {},
+): string[] {
+  // DSH rc.8 stops parsing launcher options after the first web-app option.
+  // Keep every launcher-owned --patch before --no-open/--port so the overlay
+  // is consumed by `dsh web` instead of being forwarded to the web app.
+  const args = ['web', '--patch', desktopBridgePatchPath]
+  if (options.patchPath !== undefined) args.push('--patch', options.patchPath)
+  args.push('--patch', pluginRecoveryPatchPath, '--no-open', '--port', '0')
+  return args
+}
+
 type HarnessChild = ChildProcessByStdio<null, Readable, Readable>
 
 export class HarnessProcess extends EventEmitter {
@@ -48,10 +62,11 @@ export class HarnessProcess extends EventEmitter {
     const toolchain = await this.toolchainManager.prepare(candidate)
     this.stopping = false
     const environment = prependToolchainToPath(process.env, toolchain.binPath)
-    const harnessArgs = ['web', '--patch', this.desktopBridge.patchPath]
-    if (options.patchPath !== undefined) harnessArgs.push('--patch', options.patchPath)
-    harnessArgs.push('--patch', this.pluginRecoveryPatchPath)
-    harnessArgs.push('--port', '0')
+    const harnessArgs = buildHarnessArguments(
+      this.desktopBridge.patchPath,
+      this.pluginRecoveryPatchPath,
+      options,
+    )
     const child = spawn(this.electronExecutable, [
       '--expose-internals', HARNESS_BOOTSTRAP, candidate.entryPath, ...harnessArgs,
     ], {

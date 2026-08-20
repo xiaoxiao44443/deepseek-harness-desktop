@@ -47,7 +47,7 @@ jobs:
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v7
         with:
-          name: deepseek-harness-desktop-windows-x64
+          name: dfy-dsh-desktop-windows-x64
           if-no-files-found: error
           retention-days: 14
           path: release/DeepSeek-Harness-Desktop-*-x64.exe

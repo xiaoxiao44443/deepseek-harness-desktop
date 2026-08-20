@@ -1,5 +1,5 @@
 import { app, dialog, nativeTheme, systemPreferences } from 'electron'
-import { mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { HarnessProcess } from './harness-process.js'
 import { DESKTOP_PNPM_VERSION, HarnessRuntimeManager } from './harness-runtime.js'
@@ -29,17 +29,27 @@ if (macSystemDark) {
   app.commandLine.appendSwitch('force-dark-mode')
 }
 
-app.setName('DeepSeek Harness')
-if (process.platform === 'win32') app.setAppUserModelId('com.saltfish.deepseek-harness-desktop')
+app.setName('DFY DSH Desktop')
+if (process.platform === 'win32') app.setAppUserModelId('com.saltfish.dfy-dsh-desktop')
 
+const desktopDataRoot = join(app.getPath('home'), '.saltfish')
 const desktopUserDataPath = join(
-  app.getPath('home'),
-  '.saltfish',
-  'deepseek-harness-desktop',
+  desktopDataRoot,
+  'dfy-dsh-desktop',
 )
+const legacyDesktopUserDataPath = join(desktopDataRoot, 'deepseek-harness-desktop')
 
 // Keep desktop-owned state portable and clearly separate from Harness' official
-// ~/.dsh home on Windows, macOS, and Linux.
+// ~/.dsh home on Windows, macOS, and Linux. Preserve existing installations by
+// moving the legacy product directory before Electron opens Chromium state.
+if (!existsSync(desktopUserDataPath) && existsSync(legacyDesktopUserDataPath)) {
+  try {
+    renameSync(legacyDesktopUserDataPath, desktopUserDataPath)
+  } catch {
+    // The old directory may be locked or live on a different filesystem. In
+    // that case the new product starts clean and leaves legacy data untouched.
+  }
+}
 mkdirSync(desktopUserDataPath, { recursive: true })
 app.setPath('userData', desktopUserDataPath)
 app.setPath('sessionData', desktopUserDataPath)
@@ -100,15 +110,15 @@ if (!app.requestSingleInstanceLock()) {
     const bundledArchivePath = app.isPackaged && !usesPackagedRuntimeDirectory
       ? join(process.resourcesPath, 'harness-runtime.tgz')
       : undefined
-    const packagedNpmCli = app.isPackaged
-      ? join(bundledRuntimeRoot as string, 'node_modules', 'npm', 'bin', 'npm-cli.js')
+    const packagedPnpmCli = app.isPackaged
+      ? join(bundledRuntimeRoot as string, 'node_modules', 'pnpm', 'bin', 'pnpm.cjs')
       : undefined
     runtime = new HarnessRuntimeManager(
       app.getPath('userData'),
       process.execPath,
       bundledRuntimeRoot,
       bundledArchivePath,
-      packagedNpmCli,
+      packagedPnpmCli,
     )
     const pluginRecovery = new PluginRecoveryService(
       join(app.getPath('userData'), 'plugin-recovery.patch.json'),
