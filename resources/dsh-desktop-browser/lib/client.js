@@ -31,11 +31,7 @@ window.__ModuleLoader__.load({
       return payload;
     }
 
-    function installStyles() {
-      document.getElementById(STYLE_ID)?.remove();
-      const style = document.createElement("style");
-      style.id = STYLE_ID;
-      style.textContent = `
+    const SETTINGS_STYLES = `
         .dsh-desktop-browser-settings { width: 100%; color: var(--dsw-alias-label-primary); }
         .dsh-desktop-browser-settings h2 { margin: 0 0 22px; font-size: 18px; font-weight: 650; }
         .dsh-desktop-browser-feature { display: flex; align-items: center; gap: 16px; box-sizing: border-box; min-height: 68px; padding: 10px 16px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 16px; background: color-mix(in srgb, var(--dsw-alias-bg-layer-1) 86%, transparent); }
@@ -72,9 +68,6 @@ window.__ModuleLoader__.load({
           mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='4' width='18' height='16' rx='2'/%3E%3Cpath d='M3 8h18M9.5 11.5l7 5.4-4.1.5-1.9 3.4-1.7-.9 1.8-3.3-3.1-2.5Z'/%3E%3C/svg%3E") center / contain no-repeat;
         }
       `;
-      document.head.appendChild(style);
-      return () => { if (style.isConnected) style.remove(); };
-    }
 
     function BrowserIcon() {
       return React.createElement("svg", { viewBox: "0 0 48 48", fill: "none", "aria-hidden": true },
@@ -232,6 +225,7 @@ window.__ModuleLoader__.load({
 
       const disabled = loading || saving;
       return React.createElement("section", { className: "dsh-desktop-browser-settings" },
+        React.createElement("style", { id: STYLE_ID }, SETTINGS_STYLES),
         React.createElement("h2", null, "浏览器"),
         React.createElement("div", { className: "dsh-desktop-browser-feature" },
           React.createElement("div", { className: "dsh-desktop-browser-feature-icon" }, React.createElement(BrowserIcon)),
@@ -300,7 +294,6 @@ window.__ModuleLoader__.load({
     exports.name = "desktop-browser-settings";
     exports.inject = ["slots"];
     exports.apply = function apply(ctx) {
-      ctx.effect(() => installStyles(), "desktop-browser: settings styles");
       ctx.slots.inject("settings.section", () => ctx.slots.register({
         name: "settings.section",
         id: "desktop-browser",

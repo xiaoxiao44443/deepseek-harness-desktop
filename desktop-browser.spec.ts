@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import vm from 'node:vm'
 import { browserScreenshotCaptureWindowOptions, normalizeBrowserAddress, normalizeBrowserSettings } from './src/main/desktop-browser.js'
 import {
   evaluatePage,
@@ -14,6 +16,49 @@ import { getProcessResourceRegistry } from './resources/dsh-desktop-browser/lib/
 afterEach(() => vi.unstubAllGlobals())
 
 describe('desktop browser settings', () => {
+  it('keeps its styles mounted with the settings section across plugin hot reloads', () => {
+    const clientSource = readFileSync(new URL('./resources/dsh-desktop-browser/lib/client.js', import.meta.url), 'utf8')
+    const react = {
+      createElement: (type: unknown, props: Record<string, unknown> | null, ...children: unknown[]) => ({
+        type,
+        props: props ?? {},
+        children,
+      }),
+      useCallback: (callback: unknown) => callback,
+      useEffect: () => undefined,
+      useState: (initial: unknown) => [initial, () => undefined],
+    }
+    let plugin: { apply(ctx: unknown): void } | undefined
+    let settingsSection: (() => { children: Array<{ type: unknown, props: Record<string, unknown>, children: unknown[] }> }) | undefined
+    const window = {
+      __ModuleLoader__: {
+        load(definition: { factory(require: (id: string) => unknown): { apply(ctx: unknown): void } }) {
+          plugin = definition.factory((id) => id === 'react' ? react : {})
+        },
+      },
+    }
+    vm.runInNewContext(clientSource, { window })
+    const effect = vi.fn()
+    plugin?.apply({
+      effect,
+      slots: {
+        inject: (_name: string, install: () => unknown) => install(),
+        register: (_definition: unknown, component: typeof settingsSection) => {
+          settingsSection = component
+          return () => undefined
+        },
+      },
+    })
+
+    const tree = settingsSection?.()
+    expect(effect).not.toHaveBeenCalled()
+    expect(tree?.children[0]).toEqual(expect.objectContaining({
+      type: 'style',
+      props: expect.objectContaining({ id: 'dsh-desktop-browser-settings-styles' }),
+      children: [expect.stringContaining('.dsh-desktop-browser-feature-icon svg { width: 42px; height: 42px; }')],
+    }))
+  })
+
   it('defaults to an enabled background browser and normalizes stored values', () => {
     expect(normalizeBrowserSettings(undefined)).toEqual({ enabled: true, agentOpenMode: 'background', displayMode: 'split' })
     expect(normalizeBrowserSettings({ enabled: false, agentOpenMode: 'visible', displayMode: 'floating' })).toEqual({
