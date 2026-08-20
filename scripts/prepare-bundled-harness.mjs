@@ -14,7 +14,8 @@ const storeRoot = resolve(projectRoot, 'build', 'pnpm-store')
 const manifest = JSON.parse(readFileSync(join(projectRoot, 'package.json'), 'utf8'))
 const version = manifest.devDependencies?.['@deepseek-ai/dsh']
 const pnpmVersion = manifest.devDependencies?.pnpm
-const policyVersion = 5
+const koffiVersion = '3.1.6'
+const policyVersion = 6
 const runtimePlatform = process.platform
 const runtimeArch = process.arch
 const installPolicy = {
@@ -76,6 +77,7 @@ if (!runtimeReady) {
     private: true,
     dependencies: {
       '@deepseek-ai/dsh': version,
+      koffi: koffiVersion,
       pnpm: pnpmVersion,
     },
   }, null, 2)}\n`, 'utf8')
@@ -96,6 +98,7 @@ if (!runtimeReady) {
     '--prefer-offline',
     '--store-dir', storeRoot,
     '--package-import-method', 'copy',
+    '--config.node-linker=hoisted',
   ], {
     cwd: projectRoot,
     env: {
@@ -117,6 +120,7 @@ if (!runtimeReady) {
   await writeFile(receiptPath, `${JSON.stringify({
     version,
     pnpmVersion,
+    koffiVersion,
     policyVersion,
     platform: runtimePlatform,
     arch: runtimeArch,

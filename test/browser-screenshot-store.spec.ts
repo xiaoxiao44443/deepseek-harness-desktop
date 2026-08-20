@@ -9,7 +9,7 @@ import {
   cssRectToImageCrop,
   pathIsInside,
   selectScreenshotCacheRemovals,
-} from './src/main/browser-screenshot-store.js'
+} from '../src/main/browser-screenshot-store.js'
 
 const temporaryPaths: string[] = []
 
@@ -89,7 +89,7 @@ describe('BrowserScreenshotStore', () => {
       scrollY: 120,
     })
 
-    expect(saved.path.startsWith(`${screenshotRoot}/`)).toBe(true)
+    expect(pathIsInside(screenshotRoot, saved.path)).toBe(true)
     expect(saved.path.endsWith('.png')).toBe(true)
     expect(store.get(saved.resourceId)?.data).toBe(png)
     expect(await readFile(saved.path)).toEqual(png)

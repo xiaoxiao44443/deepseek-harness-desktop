@@ -18,7 +18,7 @@ async function loadClientModule(overrides: Record<string, unknown> = {}): Promis
       },
     },
   })
-  await import('./resources/dsh-desktop-bridge/lib/client.js')
+  await import('../resources/dsh-desktop-bridge/lib/client.js')
   if (factory === undefined) throw new Error('Client bundle did not register its module factory')
   return factory((id) => {
     if (Object.hasOwn(overrides, id)) return overrides[id]

@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 
 describe('Harness bootstrap console compatibility', () => {
   it('keeps Electron Node workers attached to the hidden Harness console', async () => {
-    const source = await readFile(new URL('./src/harness-bootstrap.cts', import.meta.url), 'utf8')
+    const source = await readFile(new URL('../src/harness-bootstrap.cts', import.meta.url), 'utf8')
 
     expect(source).toContain('freeConsole()')
     expect(source.indexOf('freeConsole()')).toBeLessThan(source.indexOf('allocConsole()'))

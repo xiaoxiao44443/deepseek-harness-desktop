@@ -6,7 +6,7 @@ import {
   HarnessToolchainManager,
   prependToolchainToPath,
   runtimeNodeModulesRoot,
-} from './src/main/harness-toolchain.js'
+} from '../src/main/harness-toolchain.js'
 
 const temporaryRoots: string[] = []
 

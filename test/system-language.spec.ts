@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { workspaceDirectoryDialogTitle } from './src/main/system-language.js'
+import { workspaceDirectoryDialogTitle } from '../src/main/system-language.js'
 
 describe('system language strings', () => {
   it.each([

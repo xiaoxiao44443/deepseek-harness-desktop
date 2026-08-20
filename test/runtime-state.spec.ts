@@ -2,7 +2,7 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { EMPTY_RUNTIME_STATE, readRuntimeState, writeRuntimeState } from './src/main/runtime-state.js'
+import { EMPTY_RUNTIME_STATE, readRuntimeState, writeRuntimeState } from '../src/main/runtime-state.js'
 
 describe('runtime state', () => {
   it('returns a clean state when the file is absent', async () => {

@@ -1,9 +1,9 @@
 import { EventEmitter } from 'node:events'
 import { createReadStream } from 'node:fs'
 import { homedir } from 'node:os'
-import { access, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { access, mkdir, readFile, readdir, readlink, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { spawn } from 'node:child_process'
 import { pipeline } from 'node:stream/promises'
 import semver from 'semver'
@@ -15,7 +15,8 @@ import { applyHarnessRuntimeCompatibility } from './runtime-compat.js'
 const require = createRequire(import.meta.url)
 const HARNESS_PACKAGE = '@deepseek-ai/dsh'
 export const DESKTOP_PNPM_VERSION = '11.19.0'
-const BUNDLED_RUNTIME_POLICY_VERSION = 5
+export const DESKTOP_KOFFI_VERSION = '3.1.6'
+const BUNDLED_RUNTIME_POLICY_VERSION = 6
 const REGISTRY_METADATA = 'https://registry.npmjs.org/@deepseek-ai%2Fdsh'
 const UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000
 export const RUNTIME_PREPARATION_PROGRESS_EVENT = 'prepare-progress'
@@ -47,6 +48,49 @@ interface RegistryMetadata {
 export function bundledArchiveProgress(bytesRead: number, totalBytes: number): number {
   if (!Number.isFinite(bytesRead) || !Number.isFinite(totalBytes) || totalBytes <= 0) return 0
   return Math.min(99, Math.max(0, Math.floor((bytesRead / totalBytes) * 100)))
+}
+
+/**
+ * npm tar archives do not retain Windows' directory-symlink flag. pnpm's
+ * package links therefore come back as file symlinks after extraction and
+ * Node fails to realpath them with EPERM. Convert every in-tree package link
+ * to a directory junction after the runtime reaches its final path. Junctions
+ * need no Developer Mode permission and survive normal application launches.
+ */
+export async function repairWindowsPnpmArchiveLinks(
+  root: string,
+  platform: NodeJS.Platform = process.platform,
+): Promise<number> {
+  if (platform !== 'win32') return 0
+  const runtimeRoot = resolve(root)
+  const directories = [runtimeRoot]
+  const links: string[] = []
+
+  while (directories.length > 0) {
+    const directory = directories.pop() as string
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const entryPath = join(directory, entry.name)
+      if (entry.isSymbolicLink()) links.push(entryPath)
+      else if (entry.isDirectory()) directories.push(entryPath)
+    }
+  }
+
+  for (const linkPath of links) {
+    const targetPath = resolve(dirname(linkPath), await readlink(linkPath))
+    const targetRelativePath = relative(runtimeRoot, targetPath)
+    if (
+      targetRelativePath === '..'
+      || targetRelativePath.startsWith(`..${sep}`)
+      || isAbsolute(targetRelativePath)
+    ) throw new Error(`Bundled runtime link escapes its root: ${linkPath}`)
+    if (!(await stat(targetPath)).isDirectory()) {
+      throw new Error(`Bundled runtime link is not a package directory: ${linkPath}`)
+    }
+    await rm(linkPath, { force: true })
+    await symlink(targetPath, linkPath, 'junction')
+  }
+
+  return links.length
 }
 
 export class HarnessRuntimeManager extends EventEmitter {
@@ -227,6 +271,7 @@ export class HarnessRuntimeManager extends EventEmitter {
         private: true,
         dependencies: {
           [HARNESS_PACKAGE]: version,
+          koffi: DESKTOP_KOFFI_VERSION,
           pnpm: DESKTOP_PNPM_VERSION,
         },
       }, null, 2)}\n`, 'utf8')
@@ -239,6 +284,7 @@ export class HarnessRuntimeManager extends EventEmitter {
       await this.runNode(this.resolvePnpmCli(), [
         'install', '--dir', stagingPath, '--prod', '--no-lockfile', '--prefer-offline',
         '--store-dir', this.packageStore, '--package-import-method', 'copy',
+        '--config.node-linker=hoisted',
       ])
       const stagedEntry = join(stagingPath, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
       const stagedPnpmEntry = join(stagingPath, 'node_modules', 'pnpm', 'bin', 'pnpm.cjs')
@@ -293,9 +339,14 @@ export class HarnessRuntimeManager extends EventEmitter {
         access(pnpmEntryPath),
         readFile(receiptPath, 'utf8'),
       ])
-      const receipt = JSON.parse(receiptText) as { pnpmVersion?: unknown; policyVersion?: unknown }
+      const receipt = JSON.parse(receiptText) as {
+        pnpmVersion?: unknown
+        koffiVersion?: unknown
+        policyVersion?: unknown
+      }
       if (
         receipt.pnpmVersion !== DESKTOP_PNPM_VERSION
+        || receipt.koffiVersion !== DESKTOP_KOFFI_VERSION
         || receipt.policyVersion !== BUNDLED_RUNTIME_POLICY_VERSION
       ) throw new Error('Bundled runtime policy is stale')
       return
@@ -308,6 +359,7 @@ export class HarnessRuntimeManager extends EventEmitter {
     const stagingPath = `${this.bundledRuntimeRoot}.staging-${process.pid}`
     await rm(stagingPath, { recursive: true, force: true })
     await mkdir(stagingPath, { recursive: true })
+    let activated = false
     try {
       const archiveSize = (await stat(this.bundledArchivePath)).size
       let bytesRead = 0
@@ -331,9 +383,16 @@ export class HarnessRuntimeManager extends EventEmitter {
       await rm(this.bundledRuntimeRoot, { recursive: true, force: true })
       await mkdir(dirname(this.bundledRuntimeRoot), { recursive: true })
       await rename(stagingPath, this.bundledRuntimeRoot)
+      activated = true
+      await repairWindowsPnpmArchiveLinks(this.bundledRuntimeRoot)
+      await Promise.all([
+        access(join(this.bundledRuntimeRoot, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')),
+        access(join(this.bundledRuntimeRoot, 'node_modules', 'pnpm', 'bin', 'pnpm.cjs')),
+      ])
       this.emit(RUNTIME_PREPARATION_PROGRESS_EVENT, 100)
     } catch (error) {
-      await rm(stagingPath, { recursive: true, force: true })
+      await rm(stagingPath, { recursive: true, force: true }).catch(() => undefined)
+      if (activated) await rm(this.bundledRuntimeRoot, { recursive: true, force: true }).catch(() => undefined)
       throw error
     }
   }

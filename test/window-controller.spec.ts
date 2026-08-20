@@ -95,9 +95,9 @@ import {
   parseHarnessThemePreference,
   resolveHarnessThemePreference,
   WindowController,
-} from './src/main/window-controller.js'
-import { RUNTIME_PREPARATION_PROGRESS_EVENT } from './src/main/harness-runtime.js'
-import { DESKTOP_CONTEXT_MENU_TRANSPORT_KEY } from './src/shared/context-menu.js'
+} from '../src/main/window-controller.js'
+import { RUNTIME_PREPARATION_PROGRESS_EVENT } from '../src/main/harness-runtime.js'
+import { DESKTOP_CONTEXT_MENU_TRANSPORT_KEY } from '../src/shared/context-menu.js'
 
 describe('Harness theme preference parsing', () => {
   it('recognizes explicit and system preferences without matching unrelated settings', () => {

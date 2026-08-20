@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   parsePluginInitializationFailure,
   PluginRecoveryService,
-} from './src/main/plugin-recovery.js'
+} from '../src/main/plugin-recovery.js'
 
 const temporaryPaths: string[] = []
 

@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 
 describe('Windows ACL runner worker', () => {
   it('attaches Electron-as-Node runners to the Harness console before importing the runner', async () => {
-    const source = await readFile(new URL('./src/windows-acl-runner-worker.cts', import.meta.url), 'utf8')
+    const source = await readFile(new URL('../src/windows-acl-runner-worker.cts', import.meta.url), 'utf8')
     const attachIndex = source.indexOf('attachToHarnessConsole(runnerEntry)')
     const importIndex = source.indexOf('await import(pathToFileURL(runnerEntry).href)')
 

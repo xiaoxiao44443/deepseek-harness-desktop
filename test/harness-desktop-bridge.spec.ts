@@ -2,8 +2,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { HarnessDesktopBridgeHost } from './src/main/harness-desktop-bridge.js'
-import { apply, createRestartTool, STATIC_GUIDANCE } from './resources/dsh-desktop-bridge/lib/index.js'
+import { HarnessDesktopBridgeHost } from '../src/main/harness-desktop-bridge.js'
+import { apply, createRestartTool, STATIC_GUIDANCE } from '../resources/dsh-desktop-bridge/lib/index.js'
 
 const hosts: HarnessDesktopBridgeHost[] = []
 const temporaryPaths: string[] = []

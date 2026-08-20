@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { applyHarnessRuntimeCompatibility, patchDirectoryPickerWorkerSource } from './src/main/runtime-compat.js'
+import { applyHarnessRuntimeCompatibility, patchDirectoryPickerWorkerSource } from '../src/main/runtime-compat.js'
 
 const buggyWorker = `const post = (message) => {
   send(message, () => {

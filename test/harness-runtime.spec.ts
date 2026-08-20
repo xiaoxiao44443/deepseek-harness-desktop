@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { c as createTar } from 'tar'
@@ -6,8 +6,9 @@ import { describe, expect, it } from 'vitest'
 import {
   bundledArchiveProgress,
   HarnessRuntimeManager,
+  repairWindowsPnpmArchiveLinks,
   RUNTIME_PREPARATION_PROGRESS_EVENT,
-} from './src/main/harness-runtime.js'
+} from '../src/main/harness-runtime.js'
 
 async function writeRuntimeFixture(root: string, version: string): Promise<void> {
   const dshRoot = join(root, 'node_modules', '@deepseek-ai', 'dsh')
@@ -70,6 +71,28 @@ describe('bundled Harness archive progress', () => {
       expect(progress.at(-1)).toBe(100)
       await expect(access(join(bundledRoot, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')))
         .resolves.toBeUndefined()
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('Windows bundled runtime links', () => {
+  it.runIf(process.platform === 'win32')('repairs pnpm directory links as executable junctions', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-runtime-links-'))
+    try {
+      const packageRoot = join(root, 'node_modules', '.pnpm', 'package', 'node_modules', 'package')
+      const packageLink = join(root, 'node_modules', 'package')
+      await mkdir(packageRoot, { recursive: true })
+      await writeFile(join(packageRoot, 'index.js'), 'export {}\n')
+      await symlink(packageRoot, packageLink, 'junction')
+
+      expect((await lstat(packageLink)).isSymbolicLink()).toBe(true)
+      await expect(stat(packageLink)).resolves.toMatchObject({})
+
+      expect(await repairWindowsPnpmArchiveLinks(root)).toBe(1)
+      await expect(stat(packageLink)).resolves.toMatchObject({})
+      await expect(readFile(join(packageLink, 'index.js'), 'utf8')).resolves.toBe('export {}\n')
     } finally {
       await rm(root, { recursive: true, force: true })
     }

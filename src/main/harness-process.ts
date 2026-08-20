@@ -9,7 +9,18 @@ import { parsePluginInitializationFailure, PluginInitializationError } from './p
 
 const URL_PATTERN = /dsh web:\s+(http:\/\/127\.0\.0\.1:\d+)/u
 const START_TIMEOUT_MS = 90_000
+const STARTUP_OUTPUT_DETAIL_LIMIT = 2_000
 const HARNESS_BOOTSTRAP = fileURLToPath(new URL('../harness-bootstrap.cjs', import.meta.url))
+
+export function withHarnessStartupOutput(error: unknown, startupOutput: string): Error {
+  const message = error instanceof Error ? error.message : String(error)
+  const detail = startupOutput
+    .replaceAll(/\u001b\[[0-9;]*m/gu, '')
+    .trim()
+    .slice(-STARTUP_OUTPUT_DETAIL_LIMIT)
+  if (detail.length === 0 || message.includes(detail)) return error instanceof Error ? error : new Error(message)
+  return new Error(`${message}\n启动输出：\n${detail}`)
+}
 
 export interface RunningHarness {
   candidate: HarnessRuntimeCandidate
@@ -112,7 +123,7 @@ export class HarnessProcess extends EventEmitter {
     } catch (error) {
       const failure = parsePluginInitializationFailure(startupOutput)
       if (failure !== undefined) throw new PluginInitializationError(failure)
-      throw error
+      throw withHarnessStartupOutput(error, startupOutput)
     } finally {
       child.stdout.off('data', captureStartupOutput)
       child.stderr.off('data', captureStartupOutput)

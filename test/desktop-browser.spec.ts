@@ -1,23 +1,23 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
-import { browserScreenshotCaptureWindowOptions, normalizeBrowserAddress, normalizeBrowserSettings } from './src/main/desktop-browser.js'
+import { browserScreenshotCaptureWindowOptions, normalizeBrowserAddress, normalizeBrowserSettings } from '../src/main/desktop-browser.js'
 import {
   evaluatePage,
   parseLocatorPlan,
   runNavigationWithRetry,
   waitForNavigationStability,
   type BrowserNavigationState,
-} from './src/main/desktop-browser-automation.js'
-import type { BrowserTabRuntime } from './src/main/desktop-browser-types.js'
-import { BROWSER_CONTROL_DOCUMENTATION, BROWSER_SKILL, createBrowserTools } from './resources/dsh-desktop-browser/lib/index.js'
-import { getProcessResourceRegistry } from './resources/dsh-desktop-browser/lib/resource-core-runtime.js'
+} from '../src/main/desktop-browser-automation.js'
+import type { BrowserTabRuntime } from '../src/main/desktop-browser-types.js'
+import { BROWSER_CONTROL_DOCUMENTATION, BROWSER_SKILL, createBrowserTools } from '../resources/dsh-desktop-browser/lib/index.js'
+import { getProcessResourceRegistry } from '../resources/dsh-desktop-browser/lib/resource-core-runtime.js'
 
 afterEach(() => vi.unstubAllGlobals())
 
 describe('desktop browser settings', () => {
   it('keeps its styles mounted with the settings section across plugin hot reloads', () => {
-    const clientSource = readFileSync(new URL('./resources/dsh-desktop-browser/lib/client.js', import.meta.url), 'utf8')
+    const clientSource = readFileSync(new URL('../resources/dsh-desktop-browser/lib/client.js', import.meta.url), 'utf8')
     const react = {
       createElement: (type: unknown, props: Record<string, unknown> | null, ...children: unknown[]) => ({
         type,

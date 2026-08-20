@@ -3,8 +3,8 @@ import {
   clampContextMenuPosition,
   parsePluginContextMenuCollection,
   sanitizeContextMenuEntries,
-} from './src/shared/context-menu.js'
-import { appendPluginContextMenuItems, buildBuiltinContextMenuItems } from './src/main/context-menu.js'
+} from '../src/shared/context-menu.js'
+import { appendPluginContextMenuItems, buildBuiltinContextMenuItems } from '../src/main/context-menu.js'
 
 describe('desktop context menu protocol', () => {
   it('sanitizes entries and collapses invalid separators', () => {

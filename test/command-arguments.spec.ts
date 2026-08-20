@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseCommandArguments } from './src/main/command-arguments.js'
+import { parseCommandArguments } from '../src/main/command-arguments.js'
 
 describe('parseCommandArguments', () => {
   it('keeps quoted local plugin paths as one pnpm argument', () => {

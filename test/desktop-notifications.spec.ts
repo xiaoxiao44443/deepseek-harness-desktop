@@ -30,7 +30,7 @@ import {
   DEFAULT_DESKTOP_NOTIFICATION_SETTINGS,
   DesktopNotificationService,
   readDesktopNotificationSettings,
-} from './src/main/desktop-notifications.js'
+} from '../src/main/desktop-notifications.js'
 
 const temporaryPaths: string[] = []
 
