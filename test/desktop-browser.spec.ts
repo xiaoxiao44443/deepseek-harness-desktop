@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
-import { browserScreenshotCaptureWindowOptions, normalizeBrowserAddress, normalizeBrowserSettings } from '../src/main/desktop-browser.js'
+import { browserScreenshotCaptureWindowOptions, normalizeBrowserAddress, normalizeBrowserSettings, resolveBrowserTabForDisplay } from '../src/main/desktop-browser.js'
 import {
   evaluatePage,
   parseLocatorPlan,
@@ -81,6 +81,19 @@ describe('desktop browser settings', () => {
     )
     expect(() => normalizeBrowserAddress('browser automation', false)).toThrow('完整')
     expect(() => normalizeBrowserAddress('file:///tmp/example.html', false)).toThrow('完整')
+  })
+
+  it('reveals an existing background tab instead of creating a blank tab', () => {
+    expect(resolveBrowserTabForDisplay([
+      { id: 'agent-1', destroyed: false },
+    ])).toBe('agent-1')
+    expect(resolveBrowserTabForDisplay([
+      { id: 'agent-1', destroyed: false },
+      { id: 'manual', destroyed: false },
+    ])).toBe('manual')
+    expect(resolveBrowserTabForDisplay([
+      { id: 'agent-1', destroyed: true },
+    ])).toBeUndefined()
   })
 })
 

@@ -107,6 +107,18 @@ export function browserScreenshotCaptureWindowOptions(
   }
 }
 
+export function resolveBrowserTabForDisplay(
+  tabs: readonly { id: string; destroyed: boolean }[],
+): string | undefined {
+  const manual = tabs.find((tab) => tab.id === MANUAL_TAB_ID && !tab.destroyed)
+  if (manual !== undefined) return manual.id
+  for (let index = tabs.length - 1; index >= 0; index -= 1) {
+    const tab = tabs[index]
+    if (tab !== undefined && !tab.destroyed) return tab.id
+  }
+  return undefined
+}
+
 function inputModifierState(value: unknown): { altKey: boolean; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean; mask: number } {
   if (value === undefined) return { altKey: false, ctrlKey: false, metaKey: false, shiftKey: false, mask: 0 }
   if (!Array.isArray(value) || value.some((key) => !['Alt', 'Control', 'ControlOrMeta', 'Meta', 'Shift'].includes(String(key)))) {
@@ -1620,10 +1632,18 @@ export class DesktopBrowserService extends EventEmitter {
     if (!this.settings.enabled) throw new Error('内置浏览器已在设置中关闭。')
     const active = this.activeTab()
     if (active !== undefined && !active.view.webContents.isDestroyed()) return active.view
-    let manual = this.tabs.get(MANUAL_TAB_ID)
-    if (manual === undefined || manual.view.webContents.isDestroyed()) {
-      manual = await this.createTab(MANUAL_TAB_ID)
+    const existingTabId = resolveBrowserTabForDisplay([...this.tabs.values()].map((tab) => ({
+      id: tab.id,
+      destroyed: tab.view.webContents.isDestroyed(),
+    })))
+    if (existingTabId !== undefined) {
+      const existing = this.tabs.get(existingTabId)
+      if (existing !== undefined) {
+        await this.selectTab(existing.id)
+        return existing.view
+      }
     }
+    const manual = await this.createTab(MANUAL_TAB_ID)
     await this.selectTab(manual.id)
     return manual.view
   }
