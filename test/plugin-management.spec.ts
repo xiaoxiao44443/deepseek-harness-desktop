@@ -11,6 +11,29 @@ afterEach(async () => {
 })
 
 describe('PluginManagementService', () => {
+  it('ignores dependency storage and directories without a Profile manifest', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-plugin-profiles-'))
+    roots.push(root)
+    const harnessHome = join(root, 'home')
+    const profilesRoot = join(harnessHome, 'profiles')
+    await mkdir(join(profilesRoot, 'web'), { recursive: true })
+    await mkdir(join(profilesRoot, 'node_modules'), { recursive: true })
+    await mkdir(join(profilesRoot, 'cache'), { recursive: true })
+    await writeFile(join(profilesRoot, 'web', 'package.json'), JSON.stringify({
+      dsh: { profile: { bundles: [] } },
+    }))
+    await writeFile(join(profilesRoot, 'node_modules', 'package.json'), JSON.stringify({
+      name: 'dependency-storage',
+    }))
+
+    const service = new PluginManagementService(harnessHome, {
+      getWindow: () => undefined,
+      runPlugin: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+    })
+
+    expect((await service.getInventory()).profiles.map((profile) => profile.name)).toEqual(['web'])
+  })
+
   it('separates built-in, local, registry, and inactive dependencies', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-plugin-management-'))
     roots.push(root)

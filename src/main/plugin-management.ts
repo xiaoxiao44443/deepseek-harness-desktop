@@ -52,9 +52,10 @@ export class PluginManagementService {
       throw error
     }
 
-    const profileNames = directories
-      .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
-      .map((entry) => entry.name)
+    const profileNames = (await Promise.all(directories
+      .filter((entry) => entry.name !== 'node_modules' && (entry.isDirectory() || entry.isSymbolicLink()))
+      .map(async (entry) => await hasProfileManifest(join(profilesRoot, entry.name)) ? entry.name : undefined)))
+      .filter((name): name is string => name !== undefined)
       .sort((left, right) => left === 'web' ? -1 : right === 'web' ? 1 : left.localeCompare(right))
     const profiles = await Promise.all(profileNames.map((name) => this.readProfile(name)))
     return { profiles, scannedAt: new Date().toISOString() }
@@ -203,6 +204,15 @@ async function readMetadataFile(path: string): Promise<PackageMetadata | undefin
     }
   } catch {
     return undefined
+  }
+}
+
+async function hasProfileManifest(profileDir: string): Promise<boolean> {
+  try {
+    await access(join(profileDir, 'package.json'))
+    return true
+  } catch (error) {
+    return !isMissingFileError(error)
   }
 }
 
