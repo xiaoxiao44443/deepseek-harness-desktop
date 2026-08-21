@@ -50,4 +50,4 @@ jobs:
           name: dfy-dsh-desktop-windows-x64
           if-no-files-found: error
           retention-days: 14
-          path: release/DeepSeek-Harness-Desktop-*-x64.exe
+          path: release/DFY-DSH-Desktop-*-x64.exe

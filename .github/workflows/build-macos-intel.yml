@@ -52,5 +52,5 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           path: |
-            release/DeepSeek-Harness-Desktop-*-macos-x64.dmg
-            release/DeepSeek-Harness-Desktop-*-macos-x64.zip
+            release/DFY-DSH-Desktop-*-macos-x64.dmg
+            release/DFY-DSH-Desktop-*-macos-x64.zip

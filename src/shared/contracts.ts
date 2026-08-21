@@ -4,7 +4,7 @@ export type HarnessLifecycle = 'starting' | 'ready' | 'stopped' | 'error'
 export type ColorTheme = 'dark' | 'light'
 export type DesktopPlatform = 'windows' | 'macos' | 'linux'
 
-export type HarnessUpdateStatus = 'idle' | 'checking' | 'downloading' | 'ready' | 'current' | 'error'
+export type HarnessUpdateStatus = 'idle' | 'checking' | 'available' | 'downloading' | 'ready' | 'current' | 'error'
 
 export type DevelopmentCliStatus =
   | 'enabled'

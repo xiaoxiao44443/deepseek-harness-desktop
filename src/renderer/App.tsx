@@ -72,6 +72,9 @@ function updatePresentation(state: DesktopState): {
   if (state.updateStatus === 'ready') {
     return { ...result, title: '重启并应用更新', detail: state.updateVersion ?? '', dotClass: 'item-dot active ready' }
   }
+  if (state.updateStatus === 'available') {
+    return { ...result, title: '下载 Harness 更新', detail: state.updateVersion ?? '', dotClass: 'item-dot active available' }
+  }
   if (state.updateStatus === 'checking') {
     return { ...result, title: '正在检查更新…', dotClass: 'item-dot active busy' }
   }

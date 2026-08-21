@@ -161,12 +161,14 @@ function ApplicationMenu({ payload }: { payload: BrowserMenuWindowPayload }): Re
   if (application === undefined) return null
   const status = application.updateStatus
   const updateTitle = status === 'ready' ? '重启并应用更新'
+    : status === 'available' ? '下载 Harness 更新'
     : status === 'checking' ? '正在检查更新…'
       : status === 'downloading' ? '正在下载更新…'
         : status === 'error' ? '重新检查更新'
           : '检查 Harness 更新'
   const updateMeta = status === 'current' ? '已是最新' : status === 'error' ? '上次失败' : application.updateVersion ?? ''
   const updateDot = status === 'current' || status === 'ready' ? 'ready'
+    : status === 'available' ? 'available'
     : status === 'checking' || status === 'downloading' ? 'busy'
       : status === 'error' ? 'error'
         : ''

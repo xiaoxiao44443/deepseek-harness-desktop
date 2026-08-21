@@ -2,7 +2,7 @@ import { access, lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile }
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { c as createTar } from 'tar'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   bundledArchiveProgress,
   HarnessRuntimeManager,
@@ -161,6 +161,50 @@ describe('Harness runtime storage cleanup', () => {
       expect(state.badVersions['0.1.0-rc.6']).toBeUndefined()
       expect(state.badVersions['0.4.0']).toBeDefined()
     } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('Harness runtime update policy', () => {
+  it('detects automatic updates without downloading until manually requested', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-runtime-update-policy-'))
+    try {
+      const userData = join(root, 'user-data')
+      const bundledRoot = join(root, 'bundled')
+      await writeRuntimeFixture(bundledRoot, '0.1.0-rc.8')
+      const manager = new HarnessRuntimeManager(userData, process.execPath, bundledRoot)
+      await manager.initialize()
+      const installVersion = vi.fn(async () => undefined)
+      ;(manager as unknown as { installVersion: typeof installVersion }).installVersion = installVersion
+      vi.stubGlobal('fetch', vi.fn(async () => ({
+        ok: true,
+        json: async () => ({ 'dist-tags': { latest: '0.1.0-rc.9' } }),
+      })))
+
+      await manager.checkForUpdates({ download: false })
+
+      expect(manager.updateState).toEqual({
+        status: 'available',
+        version: '0.1.0-rc.9',
+        message: '发现新版本，点击更新后下载',
+      })
+      expect(installVersion).not.toHaveBeenCalled()
+      let state = JSON.parse(await readFile(join(userData, 'harness-runtime', 'state.json'), 'utf8')) as {
+        pendingVersion?: string
+      }
+      expect(state.pendingVersion).toBeUndefined()
+
+      await manager.checkForUpdates()
+
+      expect(installVersion).toHaveBeenCalledWith('0.1.0-rc.9')
+      expect(manager.updateState).toMatchObject({ status: 'ready', version: '0.1.0-rc.9' })
+      state = JSON.parse(await readFile(join(userData, 'harness-runtime', 'state.json'), 'utf8')) as {
+        pendingVersion?: string
+      }
+      expect(state.pendingVersion).toBe('0.1.0-rc.9')
+    } finally {
+      vi.unstubAllGlobals()
       await rm(root, { recursive: true, force: true })
     }
   })

@@ -989,6 +989,7 @@ body.maximized .restore-icon { display: block; }
   background: #d49435;
   animation: pulse 1.1s ease-in-out infinite;
 }
+.item-dot.available { background: #d49435; }
 .item-dot.ready { background: #2fa66f; }
 .item-dot.error { background: #d95762; }
 

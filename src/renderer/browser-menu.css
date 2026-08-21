@@ -253,6 +253,7 @@ button:disabled { opacity: .38; }
 
 .application-dot.busy { background: #d49435; opacity: 1; }
 .application-dot.ready { background: #2fa66f; opacity: 1; }
+.application-dot.available { background: #d49435; opacity: 1; }
 .application-dot.error { background: #d95762; opacity: 1; }
 
 .application-footer {

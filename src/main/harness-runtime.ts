@@ -105,6 +105,7 @@ export class HarnessRuntimeManager extends EventEmitter {
   private bundled: HarnessRuntimeCandidate | undefined
   private updateView: RuntimeUpdateView = { status: 'idle' }
   private updatePromise: Promise<void> | undefined
+  private downloadRequested = false
   private updateTimer: NodeJS.Timeout | undefined
 
   constructor(
@@ -201,7 +202,7 @@ export class HarnessRuntimeManager extends EventEmitter {
   scheduleAutomaticChecks(initialDelayMs = 15_000): void {
     if (this.updateTimer !== undefined) clearTimeout(this.updateTimer)
     const run = (): void => {
-      void this.checkForUpdates().finally(() => {
+      void this.checkForUpdates({ download: false }).finally(() => {
         this.updateTimer = setTimeout(run, UPDATE_INTERVAL_MS)
         this.updateTimer.unref()
       })
@@ -215,9 +216,13 @@ export class HarnessRuntimeManager extends EventEmitter {
     this.updateTimer = undefined
   }
 
-  checkForUpdates(): Promise<void> {
+  checkForUpdates(options: { download?: boolean } = { download: true }): Promise<void> {
+    if (options.download !== false) this.downloadRequested = true
     if (this.updatePromise !== undefined) return this.updatePromise
-    this.updatePromise = this.performUpdateCheck().finally(() => { this.updatePromise = undefined })
+    this.updatePromise = this.performUpdateCheck().finally(() => {
+      this.updatePromise = undefined
+      this.downloadRequested = false
+    })
     return this.updatePromise
   }
 
@@ -247,12 +252,22 @@ export class HarnessRuntimeManager extends EventEmitter {
         return
       }
 
+      if (!this.downloadRequested) {
+        await this.persistState()
+        this.setUpdateView({
+          status: 'available',
+          version: targetVersion,
+          message: '发现新版本，点击更新后下载',
+        })
+        return
+      }
+
       this.setUpdateView({ status: 'downloading', version: targetVersion })
       await this.installVersion(targetVersion)
       state.pendingVersion = targetVersion
       delete state.badVersions[targetVersion]
       await this.persistState()
-      this.setUpdateView({ status: 'ready', version: targetVersion, message: '将在下次启动时自动应用' })
+      this.setUpdateView({ status: 'ready', version: targetVersion, message: '已下载，点击重启后应用' })
     } catch (error) {
       this.setUpdateView({ status: 'error', message: error instanceof Error ? error.message : String(error) })
     }
