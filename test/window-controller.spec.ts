@@ -93,6 +93,7 @@ vi.mock('electron', async () => {
 
 import {
   parseHarnessThemePreference,
+  resolveHarnessReleaseUrl,
   resolveHarnessThemePreference,
   WindowController,
 } from '../src/main/window-controller.js'
@@ -111,6 +112,22 @@ describe('Harness theme preference parsing', () => {
     expect(resolveHarnessThemePreference('system', true)).toBe('dark')
     expect(resolveHarnessThemePreference('light', true)).toBe('light')
     expect(resolveHarnessThemePreference('dark', false)).toBe('dark')
+  })
+})
+
+describe('Harness release URL', () => {
+  it('targets the official GitHub Release matching the running Harness version', () => {
+    expect(resolveHarnessReleaseUrl('0.1.1-rc.1')).toBe(
+      'https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.1-rc.1',
+    )
+    expect(resolveHarnessReleaseUrl('dsh-v0.1.1-rc.1')).toBe(
+      'https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.1-rc.1',
+    )
+  })
+
+  it('falls back to the releases list when no safe version is available', () => {
+    expect(resolveHarnessReleaseUrl()).toBe('https://github.com/deepseek-ai/deepseek-harness/releases')
+    expect(resolveHarnessReleaseUrl('../commits/master')).toBe('https://github.com/deepseek-ai/deepseek-harness/releases')
   })
 })
 

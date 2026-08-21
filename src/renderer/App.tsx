@@ -1167,9 +1167,9 @@ export function App(): ReactNode {
         </header>
         <div className="dialog-content">
           <dl className="version-list"><div><dt>当前 Harness</dt><dd>{state?.harnessVersion ?? '尚未启动'}</dd></div><div><dt>桌面端</dt><dd>{state?.appVersion ?? '—'}</dd></div>{availableUpdate ? <div><dt>可用更新</dt><dd>{state?.updateVersion}</dd></div> : null}</dl>
-          <p className="dialog-note">{state?.updateMessage || '官方当前未提供独立 Release Notes，可查看仓库的版本变更记录。'}</p>
+          <p className="dialog-note">当前 Harness 的版本说明和完整变更记录可在 DeepSeek Harness 官方 GitHub Release 页面查看。</p>
         </div>
-        <footer className="dialog-actions"><button className="dialog-button secondary" type="button" onClick={() => setReleaseNotesOpen(false)}>关闭</button><button className="dialog-button primary" type="button" onClick={(event) => { event.currentTarget.blur(); void desktopApi.titleMenuAction('open-changes') }}>查看官方变更记录</button></footer>
+        <footer className="dialog-actions"><button className="dialog-button secondary" type="button" onClick={() => setReleaseNotesOpen(false)}>关闭</button><button className="dialog-button primary" type="button" onClick={(event) => { event.currentTarget.blur(); void desktopApi.titleMenuAction('open-changes') }}>查看官方 Release</button></footer>
       </Modal>
 
       {state !== undefined ? <PluginManager open={pluginManagerOpen} harnessReady={ready} restarting={state.development.restarting} onClose={() => { setPluginManagerOpen(false); requestAnimationFrame(focusHarness) }} /> : null}

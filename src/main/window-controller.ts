@@ -22,7 +22,7 @@ const CONTEXT_MENU_TRANSPORT_EXPRESSION = `globalThis[Symbol.for(${JSON.stringif
 const HARNESS_LOAD_TIMEOUT_MS = 45_000
 const HARNESS_LOAD_PROBE_INTERVAL_MS = 100
 const HARNESS_LOAD_READY_FALLBACK_MS = 3_000
-const HARNESS_CHANGES_URL = 'https://github.com/deepseek-ai/deepseek-harness/commits/master/'
+const HARNESS_RELEASES_URL = 'https://github.com/deepseek-ai/deepseek-harness/releases'
 const HARNESS_PLUGIN_DOCUMENTATION_URL = 'https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/cli'
 const MAX_CLIPBOARD_IMAGE_PIXELS = 100_000_000
 
@@ -39,6 +39,12 @@ export function resolveHarnessThemePreference(
   systemDark: boolean,
 ): ColorTheme {
   return preference === 'system' ? systemDark ? 'dark' : 'light' : preference
+}
+
+export function resolveHarnessReleaseUrl(version?: string): string {
+  const normalized = version?.trim().replace(/^dsh-v/u, '').replace(/^v/u, '')
+  if (normalized === undefined || !/^[0-9A-Za-z][0-9A-Za-z.+-]*$/u.test(normalized)) return HARNESS_RELEASES_URL
+  return `${HARNESS_RELEASES_URL}/tag/${encodeURIComponent(`dsh-v${normalized}`)}`
 }
 
 interface PendingHarnessLoad {
@@ -862,7 +868,7 @@ export class WindowController {
         await this.runtime.checkForUpdates()
       }
     } else if (action === 'open-changes') {
-      await shell.openExternal(HARNESS_CHANGES_URL)
+      await shell.openExternal(resolveHarnessReleaseUrl(this.harnessVersion))
     }
   }
 
