@@ -1360,7 +1360,7 @@ export class DesktopBrowserService extends EventEmitter {
         }
       }
       else if (action === 'dismiss-menu') this.closeMenu()
-      else if (action === 'application-action' && (value === 'development' || value === 'release-notes' || value === 'update')) {
+      else if (action === 'application-action' && (value === 'plugins' || value === 'development' || value === 'release-notes' || value === 'update')) {
         this.closeMenu()
         this.emit('application-menu-action', value)
       }
@@ -1384,7 +1384,7 @@ export class DesktopBrowserService extends EventEmitter {
         if (typeof point.x === 'number' && typeof point.y === 'number') this.reopenContextMenuUnderShadow(point.x, point.y)
       }
       else if (action === 'dismiss-menu') this.closeMenu()
-      else if (action === 'application-action' && (value === 'development' || value === 'release-notes' || value === 'update')) {
+      else if (action === 'application-action' && (value === 'plugins' || value === 'development' || value === 'release-notes' || value === 'update')) {
         this.closeMenu()
         this.emit('application-menu-action', value)
       }

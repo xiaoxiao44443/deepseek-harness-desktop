@@ -1,7 +1,7 @@
-import { ArrowLeft, ArrowRight, Check, ChevronDown, Code2, Columns2, Copy, Globe2, History, Maximize2, Minimize2, Minus, MonitorSmartphone, MoreVertical, PanelRight, Plus, RotateCw, Square, TabletSmartphone, Trash2, X } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Check, ChevronDown, Code2, Columns2, Copy, FolderOpen, Globe2, History, Maximize2, Minimize2, Minus, MonitorSmartphone, MoreVertical, PanelRight, Plus, Puzzle, RotateCw, Search, Square, TabletSmartphone, Trash2, X } from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import type { BrowserDisplayMode, DesktopApplicationMenuAction, DesktopBrowserHistoryEntry, DesktopBrowserShellSnapshot, DesktopBrowserViewport, DesktopState, DevelopmentState, PluginRecoveryEntry, TitleMenuAction } from '../shared/contracts.js'
+import type { BrowserDisplayMode, DesktopApplicationMenuAction, DesktopBrowserHistoryEntry, DesktopBrowserShellSnapshot, DesktopBrowserViewport, DesktopState, DevelopmentState, ManagedPluginEntry, PluginInventory, PluginMutationResult, PluginRecoveryEntry, PluginSourceType, TitleMenuAction } from '../shared/contracts.js'
 import type { DesktopContextMenuRequest } from '../shared/context-menu.js'
 import { AgentPointerIcon } from './AgentPointerIcon.js'
 import { ContextMenu } from './ContextMenu.js'
@@ -114,18 +114,15 @@ function DevelopmentPanel({
   open,
   state,
   disabledPlugins,
-  harnessReady,
   onClose,
 }: {
   open: boolean
   state: DevelopmentState
   disabledPlugins: PluginRecoveryEntry[]
-  harnessReady: boolean
   onClose: () => void
 }): ReactNode {
-  const [profile, setProfile] = useState('')
-  const [argumentsText, setArgumentsText] = useState('')
   const [actionError, setActionError] = useState<string>()
+  const [cliError, setCliError] = useState<string>()
   const closeButton = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
@@ -143,9 +140,36 @@ function DevelopmentPanel({
   }, [onClose])
 
   const patchPath = state.patchPath ?? ''
-  const commandOutput = actionError ?? state.commandOutput
-  const commandFailed = actionError !== undefined || (state.lastExitCode !== undefined && state.lastExitCode !== 0)
-  const commandPreview = `dsh plugin --profile ${profile.trim() || '<name>'} ${argumentsText.trim() || '<args…>'}`
+  const cliRegistered = state.cli.status === 'enabled' || state.cli.status === 'broken'
+  const cliUnavailable = state.cli.status === 'unavailable'
+    || state.cli.status === 'unsupported'
+    || state.cli.status === 'conflict'
+    || state.cli.status === 'error'
+  const cliStatusLabel = state.cli.changing
+    ? '处理中…'
+    : state.cli.status === 'enabled'
+      ? '已启用'
+      : state.cli.status === 'broken'
+        ? '待修复'
+        : state.cli.status === 'conflict'
+          ? '有冲突'
+          : state.cli.status === 'error'
+            ? '异常'
+          : state.cli.status === 'unsupported'
+              ? '不支持'
+              : state.cli.status === 'unavailable'
+                ? '未就绪'
+                : '启用'
+  const cliMessage = cliError
+    ?? (state.cli.status === 'conflict' || state.cli.status === 'error' ? state.cli.message : undefined)
+  const toggleCli = async (): Promise<void> => {
+    setCliError(undefined)
+    try {
+      await desktopApi.setDevelopmentCliEnabled(!cliRegistered)
+    } catch (error) {
+      setCliError(error instanceof Error ? error.message : String(error))
+    }
+  }
 
   return (
     <Modal open={open} className="development-dialog" labelledBy="development-title" closeLabel="关闭开发工具" onClose={onClose}>
@@ -157,10 +181,29 @@ function DevelopmentPanel({
         <button ref={closeButton} className="dialog-close" type="button" aria-label="关闭开发工具" title="关闭" onClick={onClose}><X /></button>
       </header>
       <div className="dialog-content development-content">
-        <div className="runtime-badges" aria-label="开发运行时版本">
-          <span><strong>dsh</strong><span>{state.dshVersion ?? '尚未启动'}</span></span>
-          <span><strong>pnpm</strong><span>{state.pnpmVersion}</span></span>
+        <div className="development-runtime-row">
+          <div className="runtime-badges" aria-label="开发运行时版本">
+            <span><strong>dsh</strong><span>{state.dshVersion ?? '尚未启动'}</span></span>
+            <span><strong>pnpm</strong><span>{state.pnpmVersion}</span></span>
+          </div>
+          <div className="cli-toggle" title={state.cli.message}>
+            <strong>终端 dsh</strong>
+            <span className="cli-toggle-status">{cliStatusLabel}</span>
+            <button
+              className="cli-toggle-control"
+              type="button"
+              role="switch"
+              aria-label="终端 dsh"
+              aria-checked={cliRegistered}
+              disabled={state.cli.changing || cliUnavailable}
+              onClick={() => void toggleCli()}
+            >
+              <span className="cli-toggle-track" aria-hidden="true" />
+            </button>
+          </div>
         </div>
+        {cliMessage ? <p className="cli-status-message">{cliMessage}</p> : null}
+        {actionError ? <p className="cli-status-message">{actionError}</p> : null}
 
         <section className="development-section">
           <div className="section-heading"><div><h3>Patch 配置</h3><p>等价于 <code>dsh web --patch &lt;配置文件&gt;</code>，重启 Harness 后生效。</p></div></div>
@@ -186,20 +229,200 @@ function DevelopmentPanel({
           </section>
         ) : null}
 
-        <section className="development-section">
-          <div className="section-heading"><div><h3>Plugin 命令</h3><p>运行 <code>dsh plugin --profile &lt;名称&gt; &lt;pnpm 参数…&gt;</code>。</p></div></div>
-          <div className="command-fields">
-            <label><span>Profile</span><input value={profile} onChange={(event) => setProfile(event.target.value)} type="text" autoComplete="off" spellCheck="false" placeholder="例如 default" /></label>
-            <label className="arguments-field"><span>pnpm 参数</span><input value={argumentsText} onChange={(event) => setArgumentsText(event.target.value)} type="text" autoComplete="off" spellCheck="false" placeholder="例如 add ./scratch-plugin" /></label>
-            <button className="dialog-button" type="button" disabled={state.commandRunning || !harnessReady} onClick={() => void runAction(() => desktopApi.runDevelopmentPlugin({ profile, argumentsText }))}>{state.commandRunning ? '运行中…' : '运行'}</button>
-          </div>
-          <div className="command-preview">{commandPreview}</div>
-          {commandOutput ? <pre className={`command-output ${commandFailed ? 'error' : ''}`}>{commandOutput}</pre> : null}
-        </section>
-
-        <p className="development-note">创造模式仍由 Harness 内置预设管理；在 Harness 中直接选择即可。相同的 dsh/pnpm 命令也可在 Harness 终端中运行。</p>
+        <p className="development-note">插件的安装、来源与 Profile 归属已移到独立的“插件管理”。创造模式仍由 Harness 内置预设管理。</p>
       </div>
       <footer className="dialog-actions"><button className="dialog-button secondary" type="button" onClick={onClose}>完成</button></footer>
+    </Modal>
+  )
+}
+
+const PLUGIN_SOURCE_LABELS: Record<PluginSourceType, string> = {
+  builtin: '内置',
+  local: '本地',
+  git: 'Git',
+  npm: 'npm',
+  workspace: '工作区',
+  unknown: '其他',
+}
+
+function PluginManager({
+  open,
+  harnessReady,
+  restarting,
+  onClose,
+}: {
+  open: boolean
+  harnessReady: boolean
+  restarting: boolean
+  onClose: () => void
+}): ReactNode {
+  const [inventory, setInventory] = useState<PluginInventory>()
+  const [selectedProfile, setSelectedProfile] = useState('')
+  const [query, setQuery] = useState('')
+  const [source, setSource] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [operating, setOperating] = useState(false)
+  const [error, setError] = useState<string>()
+  const [lastResult, setLastResult] = useState<PluginMutationResult>()
+  const [restartRequired, setRestartRequired] = useState(false)
+  const [removeConfirmation, setRemoveConfirmation] = useState<string>()
+  const closeButton = useRef<HTMLButtonElement>(null)
+
+  const loadInventory = useCallback(async () => {
+    setLoading(true)
+    setError(undefined)
+    try {
+      const next = await desktopApi.getPluginInventory()
+      setInventory(next)
+      setSelectedProfile((current) => next.profiles.some((profile) => profile.name === current)
+        ? current
+        : next.profiles.find((profile) => profile.name === 'web')?.name ?? next.profiles[0]?.name ?? '')
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError))
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!open) return
+    closeButton.current?.focus({ preventScroll: true })
+    void loadInventory()
+  }, [loadInventory, open])
+
+  useEffect(() => setRemoveConfirmation(undefined), [selectedProfile])
+
+  const activeProfile = inventory?.profiles.find((profile) => profile.name === selectedProfile)
+  const normalizedQuery = query.trim().toLocaleLowerCase()
+  const managedPlugins = (activeProfile?.plugins ?? []).filter((plugin) => plugin.sourceType !== 'builtin')
+  const matchingPlugins = managedPlugins.filter((plugin) => normalizedQuery.length === 0
+    || `${plugin.name}\n${plugin.description ?? ''}\n${plugin.source}`.toLocaleLowerCase().includes(normalizedQuery))
+  const localCount = managedPlugins.filter((plugin) => plugin.sourceType === 'local').length
+  const missingCount = managedPlugins.filter((plugin) => plugin.status === 'missing').length
+
+  const runMutation = useCallback(async (action: () => Promise<PluginMutationResult>) => {
+    setOperating(true)
+    setError(undefined)
+    setLastResult(undefined)
+    try {
+      const result = await action()
+      setInventory(result.inventory)
+      setLastResult(result)
+      if (result.exitCode === 0) setRestartRequired(true)
+      else setError(`命令执行失败（退出码 ${result.exitCode}）。`)
+      return result.exitCode === 0
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError))
+      return false
+    } finally {
+      setOperating(false)
+    }
+  }, [])
+
+  const install = async (): Promise<void> => {
+    const value = source.trim()
+    if (selectedProfile.length === 0 || value.length === 0) return
+    if (await runMutation(() => desktopApi.installPlugin({ profile: selectedProfile, source: value }))) setSource('')
+  }
+
+  const chooseLocal = async (): Promise<void> => {
+    setError(undefined)
+    try {
+      const path = await desktopApi.chooseLocalPluginDirectory()
+      if (path !== undefined) setSource(path)
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError))
+    }
+  }
+
+  const remove = async (packageName: string): Promise<void> => {
+    if (await runMutation(() => desktopApi.removePlugin({ profile: selectedProfile, packageName }))) {
+      setRemoveConfirmation(undefined)
+    }
+  }
+
+  const restart = async (): Promise<void> => {
+    setOperating(true)
+    setError(undefined)
+    try {
+      await desktopApi.restartHarnessForDevelopment()
+      setRestartRequired(false)
+      onClose()
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError))
+    } finally {
+      setOperating(false)
+    }
+  }
+
+  const renderPlugin = (plugin: ManagedPluginEntry): ReactNode => {
+    const confirming = removeConfirmation === plugin.name
+    const stateLabel = plugin.status === 'missing' ? '来源失效' : plugin.active ? '已启用' : '未启用'
+    return (
+      <div className={`plugin-row${plugin.status === 'missing' ? ' missing' : ''}`} key={plugin.name}>
+        <div className="plugin-row-main">
+          <div className="plugin-name-line"><strong>{plugin.name}</strong>{plugin.version ? <span>{plugin.version}</span> : null}</div>
+          <p>{plugin.description ?? (plugin.sourceType === 'builtin' ? '由当前 Harness 运行时提供' : '暂无插件说明')}</p>
+          <div className="plugin-source" title={plugin.source}><span className={`plugin-source-badge ${plugin.sourceType}`}>{PLUGIN_SOURCE_LABELS[plugin.sourceType]}</span><code>{plugin.source}</code></div>
+        </div>
+        <div className="plugin-row-actions">
+          <span className={`plugin-state ${plugin.status === 'missing' ? 'error' : plugin.active ? 'active' : ''}`}>{stateLabel}</span>
+          {plugin.removable ? confirming ? (
+            <div className="plugin-remove-confirmation">
+              <button className="compact-button subtle" type="button" disabled={operating} onClick={() => setRemoveConfirmation(undefined)}>取消</button>
+              <button className="compact-button danger" type="button" disabled={operating} onClick={() => void remove(plugin.name)}>确认移除</button>
+            </div>
+          ) : <button className="plugin-remove-button" type="button" aria-label={`移除 ${plugin.name}`} title="移除插件" disabled={operating} onClick={() => setRemoveConfirmation(plugin.name)}><Trash2 /></button> : null}
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <Modal open={open} className="plugin-dialog" labelledBy="plugin-manager-title" closeLabel="关闭插件管理" onClose={onClose}>
+      <header className="dialog-header plugin-dialog-header">
+        <div className="dialog-heading">
+          <span className="development-icon plugin-manager-icon" aria-hidden="true"><Puzzle /></span>
+          <div><h2 id="plugin-manager-title">插件管理</h2><p>按 Profile 查看自定义插件、安装来源与当前状态</p></div>
+        </div>
+        <button ref={closeButton} className="dialog-close" type="button" aria-label="关闭插件管理" title="关闭" onClick={onClose}><X /></button>
+      </header>
+
+      <div className="dialog-content plugin-content">
+        <div className="plugin-toolbar">
+          <label className="plugin-profile-select"><span>Profile</span><select value={selectedProfile} disabled={loading || operating} onChange={(event) => setSelectedProfile(event.target.value)}>{inventory?.profiles.map((profile) => <option value={profile.name} key={profile.name}>{profile.name}</option>)}</select></label>
+          <div className="plugin-summary"><span><strong>{managedPlugins.length}</strong> 个自定义插件</span><span><strong>{localCount}</strong> 个本地</span>{missingCount > 0 ? <span className="error"><strong>{missingCount}</strong> 个异常</span> : null}</div>
+          <button className="plugin-icon-button" type="button" aria-label="刷新插件列表" title="刷新" disabled={loading || operating} onClick={() => void loadInventory()}><RotateCw className={loading ? 'spinning' : ''} /></button>
+        </div>
+
+        <section className="plugin-install-card">
+          <div><strong>添加插件</strong><span>支持 npm 包名、Git 仓库地址和本地目录</span></div>
+          <div className="plugin-install-fields">
+            <input value={source} type="text" autoComplete="off" spellCheck="false" placeholder="例如 @scope/plugin 或 https://github.com/…" disabled={operating} onChange={(event) => setSource(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void install() }} />
+            <button className="compact-button plugin-folder-button" type="button" disabled={operating} onClick={() => void chooseLocal()}><FolderOpen /><span>本地目录</span></button>
+            <button className="dialog-button primary plugin-install-button" type="button" disabled={operating || !harnessReady || selectedProfile.length === 0 || source.trim().length === 0} onClick={() => void install()}><Plus />{operating ? '处理中…' : '添加'}</button>
+          </div>
+          {!harnessReady ? <p className="plugin-inline-note">Harness 就绪后可安装或移除；当前仍可查看已有插件。</p> : null}
+        </section>
+
+        {restartRequired ? <div className="plugin-restart-notice"><span>插件配置已改变，重启 Harness 后生效。</span><button type="button" disabled={operating || restarting} onClick={() => void restart()}>{restarting ? '正在重启…' : '立即重启'}</button></div> : null}
+        {error ? <p className="plugin-error">{error}</p> : null}
+        {lastResult ? <details className={`plugin-command-result${lastResult.exitCode === 0 ? '' : ' error'}`}><summary>{lastResult.exitCode === 0 ? '命令执行完成' : '查看失败输出'}<code>{lastResult.command}</code></summary><pre>{lastResult.output}</pre></details> : null}
+
+        <div className="plugin-list-toolbar">
+          <div className="plugin-search"><Search aria-hidden="true" /><input value={query} type="search" placeholder="搜索名称、说明或来源" onChange={(event) => setQuery(event.target.value)} /></div>
+        </div>
+
+        <div className="plugin-list" aria-busy={loading}>
+          {loading && inventory === undefined ? <div className="plugin-empty">正在读取 Profile…</div> : null}
+          {!loading && inventory?.profiles.length === 0 ? <div className="plugin-empty">尚未发现已初始化的 Profile。</div> : null}
+          {activeProfile?.error ? <div className="plugin-empty error">{activeProfile.error}</div> : null}
+          {activeProfile !== undefined && !activeProfile.error && matchingPlugins.length === 0 ? <div className="plugin-empty">{query.trim() ? '没有匹配的插件。' : '这个 Profile 还没有安装自定义插件。'}</div> : null}
+          {matchingPlugins.length > 0 ? <section className="plugin-group"><header><span>自定义插件</span><span>{matchingPlugins.length}</span></header><div>{matchingPlugins.map(renderPlugin)}</div></section> : null}
+        </div>
+      </div>
+
+      <footer className="dialog-actions plugin-dialog-actions"><button className="plugin-docs-button" type="button" onClick={() => void desktopApi.openPluginDocumentation()}>官方插件文档</button><span /><button className="dialog-button secondary" type="button" onClick={onClose}>完成</button></footer>
     </Modal>
   )
 }
@@ -209,6 +432,7 @@ export function App(): ReactNode {
   const [menuOpen, setMenuOpen] = useState(false)
   const [releaseNotesOpen, setReleaseNotesOpen] = useState(false)
   const [developmentOpen, setDevelopmentOpen] = useState(false)
+  const [pluginManagerOpen, setPluginManagerOpen] = useState(false)
   const [startupActionPending, setStartupActionPending] = useState(false)
   const [startupActionError, setStartupActionError] = useState<string>()
   const [contextMenu, setContextMenu] = useState<DesktopContextMenuRequest>()
@@ -254,7 +478,8 @@ export function App(): ReactNode {
 
   useEffect(() => desktopApi.onApplicationMenuAction((action: DesktopApplicationMenuAction) => {
     setMenuOpen(false)
-    if (action === 'development') setDevelopmentOpen(true)
+    if (action === 'plugins') setPluginManagerOpen(true)
+    else if (action === 'development') setDevelopmentOpen(true)
     else if (action === 'release-notes') setReleaseNotesOpen(true)
   }), [])
 
@@ -294,7 +519,8 @@ export function App(): ReactNode {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return
-      if (developmentOpen) setDevelopmentOpen(false)
+      if (pluginManagerOpen) setPluginManagerOpen(false)
+      else if (developmentOpen) setDevelopmentOpen(false)
       else if (releaseNotesOpen) setReleaseNotesOpen(false)
       else if (menuOpen) setMenuOpen(false)
       else if (browserDisplayMenuOpen) setBrowserDisplayMenuOpen(false)
@@ -304,7 +530,7 @@ export function App(): ReactNode {
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
-  }, [browserDisplayMenuOpen, browserSettingsMenuOpen, developmentOpen, menuOpen, releaseNotesOpen])
+  }, [browserDisplayMenuOpen, browserSettingsMenuOpen, developmentOpen, menuOpen, pluginManagerOpen, releaseNotesOpen])
 
   useEffect(() => { if (releaseNotesOpen) releaseCloseButton.current?.focus({ preventScroll: true }) }, [releaseNotesOpen])
 
@@ -332,7 +558,7 @@ export function App(): ReactNode {
   const pluginFailure = state?.pluginFailure
   const browserOpen = state?.browser.panelOpen === true && state.browser.settings.enabled
   const browserDisplayMode: BrowserDisplayMode = state?.browser.settings.displayMode ?? 'split'
-  const browserModalOpen = releaseNotesOpen || developmentOpen
+  const browserModalOpen = releaseNotesOpen || developmentOpen || pluginManagerOpen
   const browserPanelOpen = browserOpen && browserDisplayMode !== 'floating'
   const browserMenuOpen = browserDisplayMenuOpen || browserSettingsMenuOpen
   const browserDisplayModeLabel = browserDisplayMode === 'split' ? '分栏' : browserDisplayMode === 'drawer' ? '抽屉' : '独立窗口'
@@ -913,7 +1139,8 @@ export function App(): ReactNode {
       {menuOpen && state !== undefined && update !== undefined ? (
         <section id="title-menu-popover" className={`menu-card${shellMenuPresentationPending ? ' shell-overlay-pending' : ''}${browserShellOverlayActive ? ' shell-overlay-synchronized' : ''}`} role="menu" aria-label="DFY DSH Desktop 应用菜单">
           <div className="menu-list">
-            <button id="development-action" className="menu-item" type="button" role="menuitem" onClick={(event) => { event.currentTarget.blur(); setMenuOpen(false); setDevelopmentOpen(true) }}><span className="item-label">开发工具</span><span className="item-meta">{patchEnabled ? 'Patch 已启用' : 'Patch 与 Plugin'}</span><span className="item-dot" aria-hidden="true" /></button>
+            <button id="plugins-action" className="menu-item" type="button" role="menuitem" onClick={(event) => { event.currentTarget.blur(); setMenuOpen(false); setPluginManagerOpen(true) }}><span className="item-label">插件管理</span><span className="item-meta">Profile 与来源</span><span className="item-dot" aria-hidden="true" /></button>
+            <button id="development-action" className="menu-item" type="button" role="menuitem" onClick={(event) => { event.currentTarget.blur(); setMenuOpen(false); setDevelopmentOpen(true) }}><span className="item-label">开发工具</span><span className="item-meta">{patchEnabled ? 'Patch 已启用' : 'Patch 与 CLI'}</span><span className="item-dot" aria-hidden="true" /></button>
             <button id="update-action" className="menu-item" type="button" role="menuitem" disabled={update.disabled} onClick={(event) => { event.currentTarget.blur(); void runMenuAction('update') }}><span id="update-title" className="item-label">{update.title}</span><span className="item-meta">{update.detail}</span><span className={update.dotClass} aria-hidden="true" /></button>
             <button className="menu-item" type="button" role="menuitem" onClick={(event) => { event.currentTarget.blur(); setMenuOpen(false); setReleaseNotesOpen(true) }}><span className="item-label">版本说明与变更记录</span><span className="item-meta">{state.harnessVersion ?? '尚未启动'}</span></button>
           </div>
@@ -942,7 +1169,8 @@ export function App(): ReactNode {
         <footer className="dialog-actions"><button className="dialog-button secondary" type="button" onClick={() => setReleaseNotesOpen(false)}>关闭</button><button className="dialog-button primary" type="button" onClick={(event) => { event.currentTarget.blur(); void desktopApi.titleMenuAction('open-changes') }}>查看官方变更记录</button></footer>
       </Modal>
 
-      {state !== undefined ? <DevelopmentPanel open={developmentOpen} state={state.development} disabledPlugins={state.disabledPlugins} harnessReady={ready} onClose={() => { setDevelopmentOpen(false); requestAnimationFrame(focusHarness) }} /> : null}
+      {state !== undefined ? <PluginManager open={pluginManagerOpen} harnessReady={ready} restarting={state.development.restarting} onClose={() => { setPluginManagerOpen(false); requestAnimationFrame(focusHarness) }} /> : null}
+      {state !== undefined ? <DevelopmentPanel open={developmentOpen} state={state.development} disabledPlugins={state.disabledPlugins} onClose={() => { setDevelopmentOpen(false); requestAnimationFrame(focusHarness) }} /> : null}
     </>
   )
 }

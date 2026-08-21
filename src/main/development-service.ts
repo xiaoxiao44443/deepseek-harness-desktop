@@ -4,6 +4,7 @@ import type { DevelopmentPluginRequest, DevelopmentState } from '../shared/contr
 import { readDevelopmentSettings, writeDevelopmentSettings, type DevelopmentSettings } from './development-settings.js'
 import type { HarnessCommandResult } from './harness-process.js'
 import { parseCommandArguments } from './command-arguments.js'
+import type { DshCliIntegration } from './dsh-cli-integration.js'
 
 export interface DevelopmentServiceActions {
   getWindow(): BrowserWindow | undefined
@@ -15,6 +16,7 @@ export class DevelopmentService extends EventEmitter {
   private settings: DevelopmentSettings = {}
   private restarting = false
   private commandRunning = false
+  private cliChanging = false
   private dshVersion: string | undefined
   private lastCommand: string | undefined
   private commandOutput: string | undefined
@@ -24,10 +26,12 @@ export class DevelopmentService extends EventEmitter {
     private readonly settingsPath: string,
     private readonly pnpmVersion: string,
     private readonly actions: DevelopmentServiceActions,
+    private readonly cli: DshCliIntegration,
   ) { super() }
 
   async initialize(): Promise<void> {
     this.settings = await readDevelopmentSettings(this.settingsPath)
+    await this.cli.refresh()
   }
 
   get state(): DevelopmentState {
@@ -35,6 +39,7 @@ export class DevelopmentService extends EventEmitter {
       ...(this.settings.patchPath !== undefined ? { patchPath: this.settings.patchPath } : {}),
       ...(this.dshVersion !== undefined ? { dshVersion: this.dshVersion } : {}),
       pnpmVersion: this.pnpmVersion,
+      cli: { ...this.cli.state, changing: this.cliChanging },
       restarting: this.restarting,
       commandRunning: this.commandRunning,
       ...(this.lastCommand !== undefined ? { lastCommand: this.lastCommand } : {}),
@@ -50,6 +55,24 @@ export class DevelopmentService extends EventEmitter {
   setHarnessVersion(version: string): void {
     this.dshVersion = version
     this.publish()
+  }
+
+  async refreshCli(): Promise<void> {
+    await this.cli.refresh()
+    this.publish()
+  }
+
+  async setCliEnabled(enabled: boolean): Promise<void> {
+    if (this.cliChanging) return
+    this.cliChanging = true
+    this.publish()
+    try {
+      await this.cli.setEnabled(enabled)
+    } finally {
+      this.cliChanging = false
+      await this.cli.refresh()
+      this.publish()
+    }
   }
 
   async choosePatch(): Promise<void> {

@@ -3,11 +3,12 @@ import { fileURLToPath } from 'node:url'
 import { readFile } from 'node:fs/promises'
 import { app, BrowserWindow, clipboard, ipcMain, nativeImage, nativeTheme, shell } from 'electron'
 import type { ContextMenuParams, WebContents, WebFrameMain } from 'electron'
-import type { BrowserDisplayMode, BrowserMenuKind, ColorTheme, DesktopApplicationMenuAction, DesktopBrowserMenuAnchor, DesktopBrowserNavigationAction, DesktopBrowserViewBounds, DesktopBrowserViewport, DesktopPlatform, DesktopState, DevelopmentPluginRequest, HarnessLifecycle, PluginInitializationFailure, TitleMenuAction, WindowAction } from '../shared/contracts.js'
+import type { BrowserDisplayMode, BrowserMenuKind, ColorTheme, DesktopApplicationMenuAction, DesktopBrowserMenuAnchor, DesktopBrowserNavigationAction, DesktopBrowserViewBounds, DesktopBrowserViewport, DesktopPlatform, DesktopState, DevelopmentPluginRequest, HarnessLifecycle, PluginInitializationFailure, PluginInstallRequest, PluginRemoveRequest, TitleMenuAction, WindowAction } from '../shared/contracts.js'
 import type { DesktopContextMenuActionRequest, DesktopContextMenuRequest, DesktopPointerInput, PluginContextMenuCollection } from '../shared/context-menu.js'
 import { DESKTOP_CONTEXT_MENU_TRANSPORT_KEY, parsePluginContextMenuCollection } from '../shared/context-menu.js'
 import { RUNTIME_PREPARATION_PROGRESS_EVENT, type HarnessRuntimeManager } from './harness-runtime.js'
 import type { DevelopmentService } from './development-service.js'
+import type { PluginManagementService } from './plugin-management.js'
 import { parsePluginInitializationFailure, type PluginRecoveryService } from './plugin-recovery.js'
 import { appendPluginContextMenuItems, BUILTIN_CONTEXT_MENU_ACTIONS, buildBuiltinContextMenuItems } from './context-menu.js'
 import { DEFAULT_BROWSER_SETTINGS, type DesktopBrowserService } from './desktop-browser.js'
@@ -22,6 +23,7 @@ const HARNESS_LOAD_TIMEOUT_MS = 45_000
 const HARNESS_LOAD_PROBE_INTERVAL_MS = 100
 const HARNESS_LOAD_READY_FALLBACK_MS = 3_000
 const HARNESS_CHANGES_URL = 'https://github.com/deepseek-ai/deepseek-harness/commits/master/'
+const HARNESS_PLUGIN_DOCUMENTATION_URL = 'https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/cli'
 const MAX_CLIPBOARD_IMAGE_PIXELS = 100_000_000
 
 type ColorThemePreference = ColorTheme | 'system'
@@ -87,6 +89,7 @@ export class WindowController {
     private readonly development: DevelopmentService,
     private readonly pluginRecovery?: PluginRecoveryService,
     private readonly browser?: DesktopBrowserService,
+    private readonly plugins?: PluginManagementService,
   ) {
     this.runtime.on('update-state', () => this.publishState())
     this.runtime.on(RUNTIME_PREPARATION_PROGRESS_EVENT, (progress: unknown) => {
@@ -360,9 +363,35 @@ export class WindowController {
     ipcMain.handle('desktop:development-choose-patch', () => this.development.choosePatch())
     ipcMain.handle('desktop:development-clear-patch', () => this.development.clearPatch())
     ipcMain.handle('desktop:development-restart', () => this.development.restartHarness())
+    ipcMain.handle('desktop:development-cli-enabled', (event, enabled: boolean) => {
+      if (event.sender !== this.window?.webContents || typeof enabled !== 'boolean') return
+      return this.development.setCliEnabled(enabled)
+    })
     ipcMain.handle('desktop:plugin-recovery-disable', async () => await this.recoverFailedPlugin())
     ipcMain.handle('desktop:plugin-recovery-restore', async (_event, entryId: string) => await this.restoreRecoveredPlugin(entryId))
     ipcMain.handle('desktop:development-run-plugin', (_event, request: DevelopmentPluginRequest) => this.development.runPlugin(request))
+    ipcMain.handle('desktop:plugins-inventory', (event) => {
+      if (event.sender !== this.window?.webContents) return
+      return this.plugins?.getInventory()
+    })
+    ipcMain.handle('desktop:plugins-choose-local', (event) => {
+      if (event.sender !== this.window?.webContents) return
+      return this.plugins?.chooseLocalDirectory()
+    })
+    ipcMain.handle('desktop:plugins-install', (event, request: PluginInstallRequest) => {
+      if (event.sender !== this.window?.webContents) return
+      if (this.plugins === undefined) throw new Error('插件管理服务尚未准备完成。')
+      return this.plugins.install(request)
+    })
+    ipcMain.handle('desktop:plugins-remove', (event, request: PluginRemoveRequest) => {
+      if (event.sender !== this.window?.webContents) return
+      if (this.plugins === undefined) throw new Error('插件管理服务尚未准备完成。')
+      return this.plugins.remove(request)
+    })
+    ipcMain.handle('desktop:plugins-open-documentation', async (event) => {
+      if (event.sender !== this.window?.webContents) return
+      await shell.openExternal(HARNESS_PLUGIN_DOCUMENTATION_URL)
+    })
     ipcMain.handle('desktop:browser-panel-open', async (event, open: boolean) => {
       if (event.sender !== this.window?.webContents || typeof open !== 'boolean') return
       await this.browser?.setPanelOpen(open)

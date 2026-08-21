@@ -12,6 +12,8 @@ import { HarnessDesktopBridgeHost } from './harness-desktop-bridge.js'
 import { DesktopNotificationService } from './desktop-notifications.js'
 import { PluginInitializationError, PluginRecoveryService } from './plugin-recovery.js'
 import { DesktopBrowserService } from './desktop-browser.js'
+import { DshCliIntegration } from './dsh-cli-integration.js'
+import { PluginManagementService } from './plugin-management.js'
 
 // Chromium may not propagate macOS' dark color-scheme media query into the
 // cross-origin Harness iframe. Preserve explicit Harness light/dark choices,
@@ -124,6 +126,8 @@ if (!app.requestSingleInstanceLock()) {
       join(app.getPath('userData'), 'plugin-recovery.patch.json'),
     )
     await pluginRecovery.initialize()
+    const toolchain = new HarnessToolchainManager(app.getPath('userData'), process.execPath)
+    const cliIntegration = new DshCliIntegration(toolchain.binPath, toolchain.dshCommandPath)
     const launchHarness = async (settings: DevelopmentSettings): Promise<void> => {
       if (runtime === undefined || windows === undefined || harness === undefined) {
         throw new Error('桌面运行时尚未准备完成。')
@@ -137,6 +141,7 @@ if (!app.requestSingleInstanceLock()) {
           const running = await harness.start(candidate, settings)
           await runtime.markHealthy(candidate)
           development?.setHarnessVersion(candidate.version)
+          await development?.refreshCli()
           await windows.showHarness(running.url, candidate.version)
           debugLog(`[desktop] Harness ${candidate.version} ready at ${running.url}`)
           started = true
@@ -173,12 +178,20 @@ if (!app.requestSingleInstanceLock()) {
           return await harness.runPlugin(profile, args)
         },
       },
+      cliIntegration,
     )
     await development.initialize()
     browser = new DesktopBrowserService(join(app.getPath('userData'), 'browser'))
     await browser.initialize()
+    const pluginManagement = new PluginManagementService(runtime.harnessHome, {
+      getWindow: () => windows?.getBrowserWindow(),
+      runPlugin: async (profile, args) => {
+        if (harness === undefined) throw new Error('Harness 尚未启动。')
+        return await harness.runPlugin(profile, args)
+      },
+    })
     debugLog('[desktop] creating startup window')
-    windows = new WindowController(runtime, development, pluginRecovery, browser)
+    windows = new WindowController(runtime, development, pluginRecovery, browser, pluginManagement)
     windows.setRuntimePreparing()
     await windows.create()
     debugLog('[desktop] startup window created; resolving Harness runtime')
@@ -190,7 +203,6 @@ if (!app.requestSingleInstanceLock()) {
       join(app.getPath('userData'), 'last-workspace-directory.txt'),
     )
     const directoryPickerUrl = await directoryPicker.start()
-    const toolchain = new HarnessToolchainManager(app.getPath('userData'), process.execPath)
     const desktopBridgePluginRoot = app.isPackaged
       ? join(process.resourcesPath, 'dsh-desktop-bridge')
       : join(app.getAppPath(), 'resources', 'dsh-desktop-bridge')

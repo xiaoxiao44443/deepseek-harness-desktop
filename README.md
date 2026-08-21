@@ -57,12 +57,18 @@ Harness 运行时包含平台相关的原生依赖，因此 `prepare:runtime` �
 
 macOS 使用原生红黄绿窗口按钮，并直接从 App Resources 启动随包运行时，不需要在首次启动时解压。桌面壳自己的状态仍位于 `~/.saltfish/dfy-dsh-desktop`，Harness 官方数据仍位于 `~/.dsh`。
 
+## 插件管理
+
+标题栏菜单中的“插件管理”按 Profile 汇总自定义插件，并区分 npm、Git、本地目录和 workspace 来源。列表显示插件版本、说明、启用状态与失效来源；Harness 随附的官方内置 bundle 不进入管理列表，也不能从桌面端移除。
+
+添加和移除操作始终通过官方 `dsh plugin --profile <名称> ...` 执行，由 dsh 在 pnpm 成功后维护 Profile 的 `dsh.profile.bundles`。桌面端不会直接改写 Profile。操作完成后可从管理页重启 Harness 使变更生效；遇到安装问题可直接打开官方插件文档。
+
 ## Harness 开发能力
 
 标题栏菜单中的“开发工具”提供官方开发流程的桌面入口：
 
 - **Patch 配置**：选择 `yml`、`yaml` 或 `json`，重启后等价于额外添加一个 `dsh web --patch <配置文件>`。路径会保存，下次启动继续使用；未选择文件时按钮只执行普通 Harness 重启。
-- **Plugin 命令**：填写 Profile 和 pnpm 参数，等价于 `dsh plugin --profile <名称> <参数...>`。参数会先解析为参数数组，不经系统 Shell 拼接。
+- **终端 dsh**：可将桌面端随附的 dsh 暴露为系统命令；关闭后移除桌面端创建的入口，不影响 Harness 内部运行。
 - **创造模式**：继续使用 Harness 内置预设，桌面端不复制或修改 Harness 界面。
 
 同样的命令也可以直接在 Harness 内部终端执行，例如：
@@ -73,7 +79,7 @@ pnpm --version
 dsh plugin --profile default add ./scratch-plugin
 ```
 
-Patch 是 Harness Web 服务的启动参数，因此要通过桌面菜单应用；Plugin 和普通 dsh/pnpm 命令则可在桌面入口与 Harness 内部双向使用。
+Patch 是 Harness Web 服务的启动参数，因此要通过桌面菜单应用；插件通过独立管理页或相同的官方 dsh 命令管理。
 
 ### 插件右键菜单贡献
 

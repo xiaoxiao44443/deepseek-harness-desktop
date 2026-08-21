@@ -178,7 +178,8 @@ function ApplicationMenu({ payload }: { payload: BrowserMenuWindowPayload }): Re
   return (
     <div className="application-menu">
       <div className="application-list">
-        {item('开发工具', application.patchEnabled ? 'Patch 已启用' : 'Patch 与 Plugin', 'development')}
+        {item('插件管理', 'Profile 与来源', 'plugins')}
+        {item('开发工具', application.patchEnabled ? 'Patch 已启用' : 'Patch 与 CLI', 'development')}
         {item(updateTitle, updateMeta, 'update', status === 'checking' || status === 'downloading', updateDot)}
         {item('版本说明与变更记录', application.harnessVersion ?? '尚未启动', 'release-notes')}
       </div>

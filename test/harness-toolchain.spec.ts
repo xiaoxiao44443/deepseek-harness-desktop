@@ -1,4 +1,5 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -82,12 +83,64 @@ describe('HarnessToolchainManager', () => {
       readFile(toolchain.pnpmCommand, 'utf8'),
       readFile(toolchain.nodeCommand, 'utf8'),
     ])
-    expect(dsh).toMatch(/^#!\/bin\/sh/u)
+    expect(dsh).toMatch(/^#!\/bin\/bash/u)
     expect(dsh).toContain("'/Applications/DFY DSH Desktop.app/Contents/MacOS/DFY DSH Desktop'")
     expect(dsh).toContain('"$@"')
+    expect(dsh).toContain('codesign_util.cc:')
+    expect(dsh).toContain('task_name_for_pid: (os/kern) failure (5)')
+    expect(dsh).toContain('status=${PIPESTATUS[0]}')
     expect(pnpm).toContain(pnpmEntry)
     expect(pnpm).toContain('--config.minimum-release-age=0')
     expect(node).toContain('ELECTRON_RUN_AS_NODE=1')
+  })
+
+  const posixTest = process.platform === 'win32' ? it.skip : it
+  posixTest('filters only the sandboxed-parent codesign diagnostic on macOS', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-desktop-toolchain-filter-'))
+    temporaryRoots.push(root)
+    const entryPath = join(root, 'runtime', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+    const pnpmEntry = join(root, 'runtime', 'node_modules', 'pnpm', 'bin', 'pnpm.cjs')
+    const fakeElectron = join(root, 'Fake Electron')
+    await Promise.all([
+      mkdir(join(entryPath, '..'), { recursive: true }),
+      mkdir(join(pnpmEntry, '..'), { recursive: true }),
+    ])
+    await Promise.all([
+      writeFile(entryPath, ''),
+      writeFile(pnpmEntry, ''),
+      writeFile(fakeElectron, [
+        '#!/bin/sh',
+        "printf '[test:ERROR:electron/shell/common/mac/codesign_util.cc:79] task_name_for_pid: (os/kern) failure (5)\\n' >&2",
+        "printf 'real error\\n' >&2",
+        "printf 'command output\\n'",
+        'exit 7',
+        '',
+      ].join('\n')),
+    ])
+    await chmod(fakeElectron, 0o755)
+
+    const manager = new HarnessToolchainManager(join(root, 'user-data'), fakeElectron, 'darwin')
+    const toolchain = await manager.prepare({
+      version: '1.2.3',
+      entryPath,
+      source: 'managed',
+      pending: false,
+    })
+    const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
+      execFile(toolchain.dshCommand, [], (error, stdout, stderr) => {
+        resolve({
+          code: typeof error?.code === 'number' ? error.code : 0,
+          stdout,
+          stderr,
+        })
+      })
+    })
+
+    expect(result).toEqual({
+      code: 7,
+      stdout: 'command output\n',
+      stderr: 'real error\n',
+    })
   })
 
   it('prepends the private bin without keeping duplicate Path keys', () => {
