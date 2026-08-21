@@ -1480,7 +1480,21 @@ body.maximized .restore-icon { display: block; }
   border: 1px solid var(--menu-border);
   border-radius: 9px;
   background: rgba(0, 0, 0, 0.07);
+  scrollbar-color: color-mix(in srgb, var(--menu-text) 42%, transparent) transparent;
+  scrollbar-width: thin;
 }
+
+.plugin-list::-webkit-scrollbar { width: 10px; height: 10px; background: transparent; }
+.plugin-list::-webkit-scrollbar-track,
+.plugin-list::-webkit-scrollbar-track-piece,
+.plugin-list::-webkit-scrollbar-corner { background: transparent; }
+.plugin-list::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--menu-text) 42%, transparent);
+  background-clip: padding-box;
+}
+.plugin-list::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
 
 .plugin-empty {
   display: grid;
