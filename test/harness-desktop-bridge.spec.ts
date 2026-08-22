@@ -18,6 +18,7 @@ describe('HarnessDesktopBridgeHost', () => {
     const userDataPath = await mkdtemp(join(tmpdir(), 'dsh-desktop-bridge-'))
     temporaryPaths.push(userDataPath)
     const restartHarness = vi.fn(async () => undefined)
+    const revealPath = vi.fn()
     const notifications = {
       currentSettings: { turnCompletion: 'unfocused', permissionRequests: true, questions: true },
       updateSettings: vi.fn(async (value: unknown) => value),
@@ -49,6 +50,7 @@ describe('HarnessDesktopBridgeHost', () => {
       profilePath: '/private/example/.dsh/profiles/web',
       notifications: notifications as never,
       browser: browser as never,
+      revealPath,
       restartHarness,
       restartDelayMs: 5,
     })
@@ -117,6 +119,29 @@ describe('HarnessDesktopBridgeHost', () => {
     })
     expect(shown.status).toBe(200)
     expect(notifications.show).toHaveBeenCalledWith({ kind: 'question', sessionId: 'session-1' })
+
+    const revealedPath = join(userDataPath, 'artifact.txt')
+    const revealed = await fetch(`${controlOrigin}/v1/shell/reveal`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${launch.controlToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ path: revealedPath }),
+    })
+    expect(revealed.status).toBe(200)
+    expect(revealPath).toHaveBeenCalledWith(revealedPath)
+
+    const rejectedReveal = await fetch(`${controlOrigin}/v1/shell/reveal`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${launch.controlToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ path: 'relative/artifact.txt' }),
+    })
+    expect(rejectedReveal.status).toBe(400)
+    expect(revealPath).toHaveBeenCalledTimes(1)
 
     const browserSettings = await fetch(`${controlOrigin}/v1/browser/settings`, {
       headers: { authorization: `Bearer ${launch.controlToken}` },
@@ -239,10 +264,11 @@ describe('dsh-desktop-bridge tool', () => {
       profilePath,
     })
 
-    expect(registerRoute).toHaveBeenCalledTimes(2)
+    expect(registerRoute).toHaveBeenCalledTimes(3)
     expect(registerRoute.mock.calls.map(([route]) => route.path)).toEqual([
       '/api/dsh-desktop/notifications/settings',
       '/api/dsh-desktop/notifications/show',
+      '/api/dsh-desktop/shell/reveal',
     ])
 
     expect(registeredContexts[0]?.text()).toBe('')

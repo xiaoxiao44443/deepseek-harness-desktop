@@ -1,4 +1,4 @@
-import { app, dialog, nativeTheme, systemPreferences } from 'electron'
+import { app, dialog, nativeTheme, shell, systemPreferences } from 'electron'
 import { existsSync, mkdirSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { HarnessProcess } from './harness-process.js'
@@ -226,6 +226,7 @@ if (!app.requestSingleInstanceLock()) {
       profilePath: join(runtime.harnessHome, 'profiles', 'web'),
       notifications,
       browser,
+      revealPath: (path) => shell.showItemInFolder(path),
       restartHarness: async () => {
         if (development === undefined) throw new Error('Harness 开发服务尚未准备完成。')
         await development.restartHarness()

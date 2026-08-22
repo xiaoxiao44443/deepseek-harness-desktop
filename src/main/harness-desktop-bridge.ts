@@ -27,6 +27,7 @@ export interface HarnessDesktopBridgeOptions {
   profilePath: string
   notifications: DesktopNotificationService
   browser: DesktopBrowserService
+  revealPath(path: string): void
   restartHarness(reason: string): Promise<void>
   restartDelayMs?: number
 }
@@ -131,6 +132,7 @@ export class HarnessDesktopBridgeHost {
     const supported = pathname === '/v1/restart-harness'
       || pathname === '/v1/notifications/settings'
       || pathname === '/v1/notifications/show'
+      || pathname === '/v1/shell/reveal'
       || pathname === '/v1/browser/settings'
       || pathname === '/v1/browser/history'
       || pathname === '/v1/browser/clear-data'
@@ -191,6 +193,23 @@ export class HarnessDesktopBridgeHost {
       }
       const shown = await this.options.notifications.show(await this.readJsonBody(request))
       this.sendJson(response, 200, { shown })
+      return
+    }
+
+    if (pathname === '/v1/shell/reveal') {
+      if (request.method !== 'POST') {
+        response.setHeader('allow', 'POST')
+        this.sendJson(response, 405, { accepted: false, message: 'Method not allowed' })
+        return
+      }
+      const body = await this.readJsonBody(request)
+      const path = typeof body.path === 'string' ? body.path.trim() : ''
+      if (path.length === 0 || path.length > 4_096 || /[\r\n\0]/u.test(path) || !isAbsolute(path)) {
+        this.sendJson(response, 400, { accepted: false, message: 'Path must be an absolute filesystem path' })
+        return
+      }
+      this.options.revealPath(path)
+      this.sendJson(response, 200, { revealed: true })
       return
     }
 
